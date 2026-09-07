@@ -19,6 +19,7 @@ import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
+import openpi.policies.fr3_wuji_policy as fr3_wuji_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
@@ -89,6 +90,11 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+
+    # Optional loader module inside a local dataset root. This supports legacy
+    # LeRobot-style datasets that cannot be opened by the installed LeRobot API.
+    local_dataset_loader: str | None = None
+    local_dataset_video_keys: Sequence[str] = ()
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -352,6 +358,49 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotFr3WujiDataConfig(DataConfigFactory):
+    """Configures online transforms for the legacy FR3/Wuji LeRobot dataset."""
+
+    extra_delta_transform: bool = False
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "observation.images.cam0",
+                        "observation/left_wrist_image": "observation.images.cam1",
+                        "observation/right_wrist_image": "observation.images.cam2",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+        data_transforms = _transforms.Group(
+            inputs=[fr3_wuji_policy.Fr3WujiInputs(model_type=model_config.model_type)],
+            outputs=[fr3_wuji_policy.Fr3WujiOutputs()],
+        )
+        if self.extra_delta_transform:
+            delta_action_mask = _transforms.make_bool_mask(7, -20, 7, -20)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=ModelTransformFactory()(model_config),
+            action_sequence_keys=self.action_sequence_keys,
         )
 
 
@@ -760,6 +809,45 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi05_fr3_wuji",
+        # LoRA fine-tuning so training fits on a single 32GB GPU (full fine-tuning of
+        # pi05 needs ~50GiB just to initialize params + Adam states + EMA).
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=54,
+            action_horizon=50,
+            max_token_len=256,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        # Produced by examples/fr3_wuji/convert_dataset.py: the 65 captures merged into one
+        # standard LeRobot dataset. State stays 108-dim and actions keep their original
+        # joint order, so the 54-dim slicing and reordering still happen in Fr3WujiInputs.
+        data=LeRobotFr3WujiDataConfig(
+            repo_id="fr3_wuji/tomato",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=weight_loaders.PartialCheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        # LoRA freeze filter must match the model variants above.
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=54,
+            action_horizon=50,
+            max_token_len=256,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        # EMA is turned off for LoRA fine-tuning.
+        ema_decay=None,
+        batch_size=8,
+        num_workers=8,
+        num_train_steps=20_000,
+        save_interval=2_000,
+        keep_period=10_000,
+        wandb_enabled=False,
     ),
     #
     # Fine-tuning Aloha configs.

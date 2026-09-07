@@ -1,9 +1,13 @@
 from collections.abc import Iterator, Sequence
+import dataclasses
+import importlib.util
 import logging
 import multiprocessing
 import os
+import pathlib
+import sys
 import typing
-from typing import Literal, Protocol, SupportsIndex, TypeVar
+from typing import Any, Literal, Protocol, SupportsIndex, TypeVar
 
 import jax
 import jax.numpy as jnp
@@ -127,6 +131,95 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+@dataclasses.dataclass(frozen=True)
+class _PromptFromTask:
+    def __call__(self, data: dict) -> dict:
+        if "task" not in data:
+            raise ValueError('Cannot extract prompt without "task"')
+        return {**data, "prompt": data["task"]}
+
+
+def _load_local_dataset_module(module_path: pathlib.Path) -> Any:
+    # Use a stable, path-derived module name so repeated loads in the same process reuse it.
+    module_name = f"_openpi_local_dataset_{abs(hash(module_path.resolve()))}"
+    if (existing := sys.modules.get(module_name)) is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load local dataset module: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class LocalLeRobotDataset(Dataset):
+    """Adapter around a dataset's bundled ``dataloader.py`` (legacy LeRobot layout).
+
+    The bundled loader module is imported dynamically, which is not importable by
+    name in ``spawn``-based worker processes. To stay picklable, the inner dataset
+    is dropped in ``__getstate__`` and rebuilt in each worker via ``__setstate__``.
+    """
+
+    def __init__(
+        self,
+        root: pathlib.Path,
+        loader_filename: str,
+        vector_keys: Sequence[str],
+        video_keys: Sequence[str],
+        action_horizon: int,
+    ):
+        self._root = pathlib.Path(root)
+        self._loader_filename = loader_filename
+        self._vector_keys = tuple(vector_keys)
+        self._video_keys = tuple(video_keys)
+        self._action_horizon = action_horizon
+        self._inner = None
+        self._ensure_inner()
+
+    def _ensure_inner(self) -> None:
+        if self._inner is None:
+            module = _load_local_dataset_module(self._root / self._loader_filename)
+            self._inner = module.LeRobotEpisodeDataset(
+                root=self._root,
+                vector_keys=self._vector_keys,
+                video_keys=self._video_keys,
+                action_horizon=self._action_horizon,
+            )
+
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        # The inner dataset holds an un-picklable module reference / video handles.
+        state["_inner"] = None
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._ensure_inner()
+
+    def __getitem__(self, index: SupportsIndex) -> dict:
+        self._ensure_inner()
+        return self._inner[index]
+
+    def __len__(self) -> int:
+        self._ensure_inner()
+        return len(self._inner)
+
+
+def _create_local_dataset(data_config: _config.DataConfig, action_horizon: int) -> Dataset:
+    root = pathlib.Path(typing.cast(str, data_config.repo_id))
+    dataset: Dataset = LocalLeRobotDataset(
+        root=root,
+        loader_filename=typing.cast(str, data_config.local_dataset_loader),
+        vector_keys=("observation.state", "action"),
+        video_keys=data_config.local_dataset_video_keys,
+        action_horizon=action_horizon,
+    )
+    if data_config.prompt_from_task:
+        dataset = TransformedDataset(dataset, [_PromptFromTask()])
+    return dataset
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
@@ -136,6 +229,8 @@ def create_torch_dataset(
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
+    if data_config.local_dataset_loader is not None:
+        return _create_local_dataset(data_config, action_horizon)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
