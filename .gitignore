@@ -5,6 +5,7 @@ data/
 wandb/
 replay_checks/
 logs/
+.deployment/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

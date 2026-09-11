@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "controller_sha256": null,
+  "hand_velocity_rad_s": 0.5235987755982988,
+  "hand_raw_initial_delta_rad": null,
+  "hands": {"left": null, "right": null},
+  "tests": {
+    "arm_tracking_and_stop": {"passed": false, "evidence": null, "sha256": null},
+    "left_process_loss": {"passed": false, "evidence": null, "sha256": null},
+    "left_network_loss": {"passed": false, "evidence": null, "sha256": null},
+    "left_enable_no_jump": {"passed": false, "evidence": null, "sha256": null},
+    "right_process_loss": {"passed": false, "evidence": null, "sha256": null},
+    "right_network_loss": {"passed": false, "evidence": null, "sha256": null},
+    "right_enable_no_jump": {"passed": false, "evidence": null, "sha256": null}
+  }
+}
