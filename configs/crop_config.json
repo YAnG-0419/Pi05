@@ -1,0 +1,16 @@
+{
+  "schema": "point_cloud_crop/v1",
+  "coordinate_frame": "cam0_depth_optical_frame",
+  "keep_rule": "normal_dot_xyz_plus_offset_gte_margin",
+  "crop_min": [-0.9789273, -0.3724011, 0.298],
+  "crop_max": [0.8764271, 0.2996339, 1.137779],
+  "planes": [
+    {
+      "name": "curtain",
+      "normal": [0.0, 0.51699259, -0.85598987],
+      "offset": 1.05516546,
+      "margin": 0.191,
+      "anchor": [0.0, -0.436, 0.9693534]
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+camera_bringup:
+  cam0:
+    serial_number: REPLACE_CAM0_SERIAL
+    semantic: head
+    config_file: camera_primary_params.yaml
+    start_delay_sec: 4.0
+  cam1:
+    serial_number: REPLACE_CAM1_SERIAL
+    semantic: left_wrist
+    config_file: camera_secondary_params.yaml
+    start_delay_sec: 2.0
+  cam2:
+    serial_number: REPLACE_CAM2_SERIAL
+    semantic: right_wrist
+    config_file: camera_secondary_params.yaml
+    start_delay_sec: 0.0
+  log_level: none

@@ -1,0 +1,86 @@
+# client.py 已读取此配置，支持 replay / live-shadow；没有真机输出入口。
+# null 和 *_verified 项保留硬件设计待办，不是通过改布尔值就能开放执行的开关。
+schema_version: 1
+status: shadow_implemented_hardware_pending
+mode: live_shadow
+hardware_output: false
+continuous_execution_enabled: false
+
+model:
+  uri: ws://127.0.0.1:8000
+  config: pi05_fr3_wuji
+  checkpoint: checkpoints/tomato_lora_ep65/19999
+  action_dim: 54
+  horizon: 50
+  action_sample_hz: 30
+  inflight_requests: 1
+
+observation:
+  arm_source_in_execute: ros
+  hand_source_in_execute: hand_owner
+  camera_profile: rgb
+  max_age_at_send_ms: 70
+  max_age_at_response_ms: 200
+  max_latest_feedback_age_ms: 150
+  max_skew_ms: 80
+  clock_jump_ms: 50
+
+scheduler:
+  proposed_tick_hz: 100  # 影子单步用 10 ms 计算限速；尚未验收真机调度节拍
+  acquisition_policy: reject
+  max_policy_steps_per_trial: 1
+  policy_dispatch_requires_original_observation_fresh: true
+  max_original_observation_age_at_dispatch_ms: 200
+  pending_candidate_capacity: 1
+  drop_late_generations: true
+  catch_up_missed_ticks: false
+  dispatch_transport_budget_ms: null
+  max_tick_lateness_ms: null  # 影子诊断固定容许额外 20 ms；真机值仍未验收
+  max_tracking_error_rad: null
+  acceleration_limits: null
+  stop_trajectory: null
+
+arm:
+  source: openpi
+  command_topic: /teleop/arm_commands
+  status_topic: /teleop/arm_command_status
+  initial_delta_rad: 0.05
+  max_joint_speed_rad_s: 0.7
+  observed_gateway_lease_timeout_ms: 250
+  observed_controller_command_timeout_ms: 250
+  require_all_requested_sides_accepted: true
+  require_fresh_external_torques: true
+  status_is_execution_ack: false
+  end_to_end_deadline_guard_verified: false
+  ack_timeout_ms: null
+  stop_behavior_verified: false
+
+hand:
+  owner: exclusive
+  readonly_connection_may_enable_or_disable: false
+  initial_delta_rad: null
+  kp: null
+  kd: null
+  current_limit_a: null
+  operating_velocity_limits: null
+  stop_policy: null
+  firmware_disconnect_behavior_verified: false
+  joint_limits_verified: false
+
+recording:
+  asynchronous: true
+  bounded_queues: true
+  images_on_queue_full: drop_and_count
+  critical_events_on_queue_full: controlled_stop
+
+execution_prerequisites:
+  controlled_trial_ready: false
+  hand_acquisition_verified: false
+  hardware_stop_available_and_verified: false
+  no_competing_device_owner: false
+  explicit_start_for_current_generation: false
+
+continuous_prerequisites:
+  motion_trials_verified: false
+  action_timeline_verified: false
+  commitment_window_verified: false
