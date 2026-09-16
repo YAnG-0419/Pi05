@@ -1,6 +1,6 @@
 # FR3 + Wuji GR00T deployment
 
-完整的远端到真机迁移步骤见 [MIGRATION.md](MIGRATION.md)。
+完整的工控机单机部署步骤见 [MIGRATION.md](MIGRATION.md)。
 
 This directory adds GR00T as a separate inference backend. It does not replace
 or edit `deploy/fr3_wuji_fast`, so the existing Pi05 commands and checkpoint
