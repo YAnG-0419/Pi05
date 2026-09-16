@@ -1,0 +1,54 @@
+services:
+  groot-policy:
+    image: ${GROOT_IMAGE:-pi05-groot-server:scratch30k-20260916}
+    init: true
+    ipc: host
+    gpus: all
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,nosuid,size=4g
+    networks:
+      - inference-only
+    ports:
+      - 127.0.0.1:${GROOT_PORT:-8766}:8766
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      PYTHONNOUSERSITE: "1"
+      XDG_CACHE_HOME: /tmp/cache
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ${GROOT_CHECKPOINT:?Set GROOT_CHECKPOINT to an absolute directory}:/models/checkpoint:ro
+      - ${GROOT_MODEL_CACHE:?Set GROOT_MODEL_CACHE to an absolute directory}:/models/cache:ro
+    command:
+      - --checkpoint
+      - /models/checkpoint
+      - --model-cache
+      - /models/cache
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8766"
+    healthcheck:
+      test:
+        - CMD
+        - /opt/gr00t-venv/bin/python
+        - -c
+        - >-
+          import json, urllib.request;
+          data=json.load(urllib.request.urlopen('http://127.0.0.1:8766/metadata',timeout=2));
+          assert data['warmed_up'] is True
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10m
+    stop_grace_period: 30s
+    restart: "no"
+
+networks:
+  inference-only:
+    internal: true

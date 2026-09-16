@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1.7
+
+ARG GROOT_BASE_IMAGE=gr00t:latest
+FROM ${GROOT_BASE_IMAGE}
+
+ARG PI05_REVISION=unknown
+ARG GROOT_REVISION=unknown
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="Pi05 GR00T inference server" \
+      org.opencontainers.image.description="GPU-only GR00T service; no robot device access" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision.pi05="${PI05_REVISION}" \
+      org.opencontainers.image.revision.groot="${GROOT_REVISION}"
+
+COPY --from=groot_src . /opt/Isaac-GR00T
+COPY deploy/fr3_wuji_groot /opt/Pi05/deploy/fr3_wuji_groot
+
+ENV PYTHONPATH=/opt/Pi05:/opt/Isaac-GR00T \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONNOUSERSITE=1 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    OMP_NUM_THREADS=4 \
+    OPENBLAS_NUM_THREADS=4
+
+WORKDIR /opt/Pi05
+ENTRYPOINT ["/opt/gr00t-venv/bin/python", "-B", "-m", "deploy.fr3_wuji_groot.model_server"]
