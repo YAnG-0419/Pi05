@@ -1,0 +1,18 @@
+usage: client.py [-h] [--check | --shadow | --execute | --replay REPLAY]
+                 [--rounds ROUNDS] [--supervised-trial] [--start-bridge]
+                 [--output OUTPUT]
+
+Offline replay, live shadow inference, and explicit finite real-machine
+trials.
+
+options:
+  -h, --help          show this help message and exit
+  --check
+  --shadow
+  --execute
+  --replay REPLAY
+  --rounds ROUNDS
+  --supervised-trial
+  --start-bridge      Shadow only: own Wuji SDK for readback; existing arm
+                      state publishers required
+  --output OUTPUT

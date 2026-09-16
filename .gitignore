@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.testdeps/
+.formatdeps/
+.deployment/
+logs/
+reports/*.npz
+reports/replay-*/
+
+.venv/
+dist/
+.ruff_cache/

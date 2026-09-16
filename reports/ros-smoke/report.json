@@ -1,0 +1,14 @@
+{
+  "passed": true,
+  "hardware_connected": false,
+  "synthetic_observations": true,
+  "state_shape": [
+    2,
+    54
+  ],
+  "depth_shape": [
+    2,
+    240,
+    320
+  ]
+}

@@ -1,0 +1,13 @@
+usage: serve.py [-h] [--host HOST] [--port PORT] [--device DEVICE]
+                [--checkpoint CHECKPOINT] [--smoke] [--output OUTPUT]
+
+GPU inference service. Does not import ROS or connect to hardware.
+
+options:
+  -h, --help            show this help message and exit
+  --host HOST
+  --port PORT
+  --device DEVICE
+  --checkpoint CHECKPOINT
+  --smoke
+  --output OUTPUT

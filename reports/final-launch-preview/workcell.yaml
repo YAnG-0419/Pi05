@@ -1,0 +1,18 @@
+LEFT:
+  arm_id: fr3
+  arm_prefix: left
+  controller_cpus: 16-19
+  fake_sensor_commands: 'false'
+  namespace: left
+  robot_ip: 172.16.0.2
+  urdf_file: fr3/fr3.urdf.xacro
+  use_fake_hardware: 'false'
+RIGHT:
+  arm_id: fr3
+  arm_prefix: right
+  controller_cpus: 20-23
+  fake_sensor_commands: 'false'
+  namespace: right
+  robot_ip: 172.16.1.2
+  urdf_file: fr3/fr3.urdf.xacro
+  use_fake_hardware: 'false'

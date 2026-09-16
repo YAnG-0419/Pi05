@@ -1,0 +1,33 @@
+{
+  "schema": "franka_wuji_dp_v1",
+  "checkpoint": "/home/descfly/data/dp_ckpt/dp/step=00010000.ckpt",
+  "sha256": "29639f2df6b50a5ed15e746ecd6de6fd13b9e3435f57ff72ac288a92a42c98b8",
+  "weights": "ema_model",
+  "horizon": 16,
+  "n_obs_steps": 2,
+  "n_action_steps": 8,
+  "action_dim": 54,
+  "order": [
+    "left_arm_7",
+    "right_arm_7",
+    "left_hand_20",
+    "right_hand_20"
+  ],
+  "units": "radian",
+  "action_semantics": "absolute_joint_target",
+  "source_hz": 30,
+  "num_inference_steps": 100,
+  "warmed_up": true,
+  "warmup_seconds": [
+    0.7228115038014948,
+    0.451401577796787,
+    0.45077130594290793
+  ],
+  "load_and_warmup_s": 8.338694507954642,
+  "hardware_output": false,
+  "synthetic_observations": true,
+  "output_shape": [
+    8,
+    54
+  ]
+}

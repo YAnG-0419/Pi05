@@ -1,0 +1,57 @@
+{
+  "hardware_output": false,
+  "hardware_connected": false,
+  "checks": [
+    {
+      "check": "reference_limits",
+      "ok": true,
+      "detail": 54
+    },
+    {
+      "check": "controller_overlay",
+      "ok": true,
+      "detail": "27a2a6f3724624759e701316892ffa7084c184bbd49f31fbe7e1c3939a8483cb"
+    },
+    {
+      "check": "checkpoint_exists",
+      "ok": true,
+      "detail": 6611162936
+    },
+    {
+      "check": "sdk",
+      "ok": true,
+      "detail": "/home/descfly/miniconda3/envs/pico-armhand-teleop/lib/python3.10/site-packages/wuji_sdk/wuji_sdk.cpython-310-x86_64-linux-gnu.so"
+    },
+    {
+      "check": "container_image",
+      "ok": true,
+      "detail": "sha256:7a9bf1f1d7cbff6e1443c272c89bdd93043f8f11ff2df181248a2c3a7024502c"
+    },
+    {
+      "check": "cpu_sets",
+      "ok": true,
+      "detail": "available and disjoint; realtime scheduling still requires field verification"
+    },
+    {
+      "check": "checkpoint_config_checksum",
+      "ok": true,
+      "detail": {
+        "sha256": "29639f2df6b50a5ed15e746ecd6de6fd13b9e3435f57ff72ac288a92a42c98b8",
+        "weights": [
+          "model",
+          "ema_model",
+          "optimizer"
+        ],
+        "horizon": 16,
+        "n_obs_steps": 2,
+        "n_action_steps": 8
+      }
+    },
+    {
+      "check": "isolated_container_imports",
+      "ok": true,
+      "detail": "ROS messages / SDK / bridge imports OK"
+    }
+  ],
+  "all_passed": true
+}

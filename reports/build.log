@@ -1,0 +1,17 @@
+Starting >>> teleop_interfaces
+Starting >>> franka_fr3_arm_controllers
+Finished <<< teleop_interfaces [1.89s]
+Starting >>> teleop_core
+--- stderr: teleop_core
+warning: build_py: byte-compiling is disabled, skipping.
+
+warning: install_lib: byte-compiling is disabled, skipping.
+
+---
+Finished <<< teleop_core [0.36s]
+Finished <<< franka_fr3_arm_controllers [6.70s]
+
+Summary: 3 packages finished [6.88s]
+  1 package had stderr output: teleop_core
+Prepared isolated controller source: /home/descfly/data/dp_infer/.deployment/overlay/src/franka_fr3_arm_controllers
+Built without hardware: /home/descfly/data/dp_infer/.deployment/overlay

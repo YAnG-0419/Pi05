@@ -1,0 +1,373 @@
+{
+  "name": "train_franka_dp",
+  "_target_": "diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace",
+  "task_name": "franka_dual_hand_rgbd",
+  "shape_meta": {
+    "action": {
+      "shape": [
+        54
+      ]
+    },
+    "obs": {
+      "joint_pos": {
+        "shape": [
+          54
+        ],
+        "type": "low_dim"
+      },
+      "head_rgb": {
+        "shape": [
+          3,
+          240,
+          320
+        ],
+        "type": "rgb"
+      },
+      "left_wrist_rgb": {
+        "shape": [
+          3,
+          240,
+          320
+        ],
+        "type": "rgb"
+      },
+      "right_wrist_rgb": {
+        "shape": [
+          3,
+          240,
+          320
+        ],
+        "type": "rgb"
+      },
+      "head_depth": {
+        "shape": [
+          1,
+          240,
+          320
+        ],
+        "type": "depth"
+      }
+    }
+  },
+  "exp_name": "tomato_first_stage_full",
+  "horizon": 16,
+  "n_obs_steps": 2,
+  "n_action_steps": 8,
+  "policy": {
+    "_target_": "diffusion_policy.policy.diffusion_unet_image_policy.DiffusionUnetImagePolicy",
+    "shape_meta": {
+      "action": {
+        "shape": [
+          54
+        ]
+      },
+      "obs": {
+        "joint_pos": {
+          "shape": [
+            54
+          ],
+          "type": "low_dim"
+        },
+        "head_rgb": {
+          "shape": [
+            3,
+            240,
+            320
+          ],
+          "type": "rgb"
+        },
+        "left_wrist_rgb": {
+          "shape": [
+            3,
+            240,
+            320
+          ],
+          "type": "rgb"
+        },
+        "right_wrist_rgb": {
+          "shape": [
+            3,
+            240,
+            320
+          ],
+          "type": "rgb"
+        },
+        "head_depth": {
+          "shape": [
+            1,
+            240,
+            320
+          ],
+          "type": "depth"
+        }
+      }
+    },
+    "noise_scheduler": {
+      "_target_": "diffusers.schedulers.scheduling_ddpm.DDPMScheduler",
+      "num_train_timesteps": 100,
+      "beta_start": 0.0001,
+      "beta_end": 0.02,
+      "beta_schedule": "squaredcos_cap_v2",
+      "variance_type": "fixed_small",
+      "clip_sample": true,
+      "prediction_type": "epsilon"
+    },
+    "obs_encoder": {
+      "_target_": "convest.dp.encoder.RGBDObsEncoder",
+      "shape_meta": {
+        "action": {
+          "shape": [
+            54
+          ]
+        },
+        "obs": {
+          "joint_pos": {
+            "shape": [
+              54
+            ],
+            "type": "low_dim"
+          },
+          "head_rgb": {
+            "shape": [
+              3,
+              240,
+              320
+            ],
+            "type": "rgb"
+          },
+          "left_wrist_rgb": {
+            "shape": [
+              3,
+              240,
+              320
+            ],
+            "type": "rgb"
+          },
+          "right_wrist_rgb": {
+            "shape": [
+              3,
+              240,
+              320
+            ],
+            "type": "rgb"
+          },
+          "head_depth": {
+            "shape": [
+              1,
+              240,
+              320
+            ],
+            "type": "depth"
+          }
+        }
+      },
+      "use_group_norm": true,
+      "resize_shape": null
+    },
+    "horizon": 16,
+    "n_action_steps": 8,
+    "n_obs_steps": 2,
+    "num_inference_steps": 100,
+    "obs_as_global_cond": true,
+    "diffusion_step_embed_dim": 128,
+    "down_dims": [
+      512,
+      1024,
+      2048
+    ],
+    "kernel_size": 5,
+    "n_groups": 8,
+    "cond_predict_scale": true
+  },
+  "ema": {
+    "_target_": "diffusion_policy.model.diffusion.ema_model.EMAModel",
+    "update_after_step": 0,
+    "inv_gamma": 1.0,
+    "power": 0.75,
+    "min_value": 0.0,
+    "max_value": 0.9999
+  },
+  "dataloader": {
+    "batch_size": 128,
+    "num_workers": 8,
+    "shuffle": true,
+    "pin_memory": true,
+    "persistent_workers": true,
+    "prefetch_factor": 1
+  },
+  "val_dataloader": {
+    "batch_size": 128,
+    "num_workers": 8,
+    "shuffle": false,
+    "pin_memory": true,
+    "persistent_workers": true,
+    "prefetch_factor": 1
+  },
+  "optimizer": {
+    "_target_": "torch.optim.AdamW",
+    "lr": 0.0001,
+    "betas": [
+      0.95,
+      0.999
+    ],
+    "eps": 1e-08,
+    "weight_decay": 1e-06
+  },
+  "training": {
+    "device": "cuda:0",
+    "seed": 42,
+    "debug": false,
+    "resume": false,
+    "lr_scheduler": "cosine",
+    "lr_warmup_steps": 500,
+    "num_epochs": 500,
+    "gradient_accumulate_every": 1,
+    "use_ema": true,
+    "freeze_encoder": false,
+    "rollout_every": 1,
+    "checkpoint_every": 100,
+    "checkpoint_every_steps": 10000,
+    "val_every": 1,
+    "sample_every": 5,
+    "max_train_steps": null,
+    "max_val_steps": null,
+    "tqdm_interval_sec": 5.0
+  },
+  "logging": {
+    "project": "tomato_diffusion_policy",
+    "resume": true,
+    "mode": "online",
+    "name": "tomato-dp-4gpu-bs128-20260916-115350",
+    "tags": [
+      "tomato",
+      "formal",
+      "4gpu",
+      "rgbd"
+    ],
+    "id": null,
+    "group": null
+  },
+  "checkpoint": {
+    "keep_periodic": true,
+    "save_best": true,
+    "topk": {
+      "monitor_key": "val_loss",
+      "mode": "min",
+      "k": 0,
+      "format_str": "epoch={epoch:04d}-val_loss={val_loss:.6f}.ckpt"
+    },
+    "save_last_ckpt": true,
+    "save_last_snapshot": false
+  },
+  "task": {
+    "name": "franka_dual_hand_rgbd",
+    "dataset_path": "/dev/shm/haoran-tomato-dp-12d27cc9ccd5",
+    "shape_meta": {
+      "action": {
+        "shape": [
+          54
+        ]
+      },
+      "obs": {
+        "joint_pos": {
+          "shape": [
+            54
+          ],
+          "type": "low_dim"
+        },
+        "head_rgb": {
+          "shape": [
+            3,
+            240,
+            320
+          ],
+          "type": "rgb"
+        },
+        "left_wrist_rgb": {
+          "shape": [
+            3,
+            240,
+            320
+          ],
+          "type": "rgb"
+        },
+        "right_wrist_rgb": {
+          "shape": [
+            3,
+            240,
+            320
+          ],
+          "type": "rgb"
+        },
+        "head_depth": {
+          "shape": [
+            1,
+            240,
+            320
+          ],
+          "type": "depth"
+        }
+      }
+    },
+    "dataset": {
+      "_target_": "convest.dp.dataset.FrankaImageDataset",
+      "dataset_path": "/dev/shm/haoran-tomato-dp-12d27cc9ccd5",
+      "shape_meta": {
+        "action": {
+          "shape": [
+            54
+          ]
+        },
+        "obs": {
+          "joint_pos": {
+            "shape": [
+              54
+            ],
+            "type": "low_dim"
+          },
+          "head_rgb": {
+            "shape": [
+              3,
+              240,
+              320
+            ],
+            "type": "rgb"
+          },
+          "left_wrist_rgb": {
+            "shape": [
+              3,
+              240,
+              320
+            ],
+            "type": "rgb"
+          },
+          "right_wrist_rgb": {
+            "shape": [
+              3,
+              240,
+              320
+            ],
+            "type": "rgb"
+          },
+          "head_depth": {
+            "shape": [
+              1,
+              240,
+              320
+            ],
+            "type": "depth"
+          }
+        }
+      },
+      "horizon": 16,
+      "pad_before": 1,
+      "pad_after": 7,
+      "n_obs_steps": 2,
+      "seed": 42,
+      "val_ratio": 0.1
+    },
+    "env_runner": {
+      "_target_": "convest.dp.runner.OfflineImageRunner"
+    }
+  }
+}

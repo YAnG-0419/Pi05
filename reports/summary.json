@@ -1,0 +1,11 @@
+{
+  "date": "2026-09-16",
+  "tests_passed": 65,
+  "gpu_smoke": "reports/model-smoke.json",
+  "real_data_replay": "reports/replay-real-validated/report.json",
+  "ros_collection": "reports/ros-smoke/report.json",
+  "doctor": "reports/doctor.json",
+  "hardware_connected": false,
+  "hardware_motion_tested": false,
+  "temporary_model_server_stopped": true
+}

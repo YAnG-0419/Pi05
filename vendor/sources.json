@@ -1,0 +1,134 @@
+{
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/core.py": {
+    "sha256": "817085ce5192588accd208b7ac76a9ef125cbb395af0b9a6285022b1d13fefad",
+    "destination": "dp_deploy/robot/core.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/devices.py": {
+    "sha256": "6301e1436d2c247eecd3b65d307dedfe7156b4b0bb13161026d7ac1e02db729c",
+    "destination": "dp_deploy/robot/devices.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/hand.py": {
+    "sha256": "7fe0a943826a7d61fcd4929b76b41e228d09eb99dad5618600e964512e80fd7b",
+    "destination": "dp_deploy/robot/hand.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/hand_trace.py": {
+    "sha256": "679a1f0cfbf699cb3e5112dfe2f294013a6ec8a9ba07fa4f0a631e7746935232",
+    "destination": "dp_deploy/robot/hand_trace.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/hand_contact.py": {
+    "sha256": "20865156c24e9e05588453f9b192a51a31a06a06357b6a4a8b61090932c4218c",
+    "destination": "dp_deploy/robot/hand_contact.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/hand_soft_limit.py": {
+    "sha256": "9acb2d68e1a7ea6065c62b868b792dc6cc4ad70cfed7e480fe4dd6bbb360febe",
+    "destination": "dp_deploy/robot/hand_soft_limit.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/hand_faults.py": {
+    "sha256": "a4f2fa45098c4f7298f8ff16908ed01e88ff2de17441fe19beca9af3c5ffbc67",
+    "destination": "dp_deploy/robot/hand_faults.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/motion_gc.py": {
+    "sha256": "220e12d4eb7cac116fd549dce293174052da69c978a6eaa76f110ca0c3b97bb9",
+    "destination": "dp_deploy/robot/motion_gc.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/ros_devices.py": {
+    "sha256": "73e243e55f0569d471be0a1b10d4b773c46242b53a4272714896c3b27177c8d0",
+    "destination": "dp_deploy/robot/ros_devices.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/transport.py": {
+    "sha256": "405683d544882479267cd766d6f9e3dd09364de4e315b92c84a7ce69245367ba",
+    "destination": "dp_deploy/robot/transport.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/qualification.py": {
+    "sha256": "7df78122d3096b91a43cd3718c7c0e672a2e1bd67f5c386dbcfe97919483554e",
+    "destination": "dp_deploy/robot/qualification.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/loop_diagnostics.py": {
+    "sha256": "e791ceb3adea02279e0416ac3a8c5a2ead7dea1af06628a2300a2aae50a8b431",
+    "destination": "dp_deploy/robot/loop_diagnostics.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/poll_timing.py": {
+    "sha256": "0f871b7a8f7bba751097f8584cdb0ea03b9a4903b44ee74b62207f5f59c1cf0a",
+    "destination": "dp_deploy/robot/poll_timing.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/limits.py": {
+    "sha256": "50ef64cff1048f3e45e526b4e8a4dc600435f4424fdea8299965702e7a79f663",
+    "destination": "dp_deploy/robot/limits.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/ipc.py": {
+    "sha256": "c2566a4e598ab94d0bc1ef878cfeb811df639b2f111390ccc08f51a14ef351a9",
+    "destination": "dp_deploy/robot/ipc.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/bridge.py": {
+    "sha256": "963dcdf1268a5bd182e378c355c9b6f06944af585ee54a95d6bba9d5bab8b4c8",
+    "destination": "dp_deploy/robot/bridge.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/ros_boundary.py": {
+    "sha256": "7c43a98e66d7af4b0b77d0daca51552f51530751a9b42e60081edbd842c6520b",
+    "destination": "dp_deploy/robot/ros_boundary.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/prepare_overlay.py": {
+    "sha256": "92e1c3ad482171606054a08190ef5642850b743bdc807edfbf4473ea58e400e3",
+    "destination": "dp_deploy/robot/prepare_overlay.py"
+  },
+  "/home/descfly/picking-tomatoes/openpi/experiments/weight_motion_eval/oneshot/record_build.py": {
+    "sha256": "3daee1ff19f0e3f99f3e9c5fb0c5712e3ddddef23f7241b6f9e021e06c54638c",
+    "destination": "dp_deploy/robot/record_build.py"
+  },
+  "/home/descfly/lcl_work/diffusion_policy/diffusion_policy/policy/diffusion_unet_image_policy.py": {
+    "sha256": "00d6767fcbc965a6e7a38ef4ae143116122e5b189ae381f082cdc6f817ca09c9",
+    "destination": "vendor/diffusion_policy/policy/diffusion_unet_image_policy.py"
+  },
+  "/home/descfly/lcl_work/diffusion_policy/diffusion_policy/policy/base_image_policy.py": {
+    "sha256": "32fd3fe35e2827f4472e195381e642dd8d78f4f0038f4f9625e0128c76e1aecd",
+    "destination": "vendor/diffusion_policy/policy/base_image_policy.py"
+  },
+  "/home/descfly/lcl_work/diffusion_policy/diffusion_policy/model/vision/multi_image_obs_encoder.py": {
+    "sha256": "d0b02e56142804bbaec766896d8f903e251bd643d117d075512737132cd6638c",
+    "destination": "vendor/diffusion_policy/model/vision/multi_image_obs_encoder.py"
+  },
+  "/home/descfly/lcl_work/diffusion_policy/diffusion_policy/model/vision/crop_randomizer.py": {
+    "sha256": "85787b6becd337352c2a1795f1e77be977c073134f91c3d0924b9d0e36c92978",
+    "destination": "vendor/diffusion_policy/model/vision/crop_randomizer.py"
+  },
+  "/home/descfly/lcl_work/diffusion_policy/diffusion_policy/model/diffusion/positional_embedding.py": {
+    "sha256": "2266c75ecc9c9ac8ca126839d39a7bafbdd7af8800d6de903f66815e64cc366c",
+    "destination": "vendor/diffusion_policy/model/diffusion/positional_embedding.py"
+  },
+  "/home/descfly/lcl_work/diffusion_policy/diffusion_policy/model/diffusion/mask_generator.py": {
+    "sha256": "23dba4c112ed57e41d530612c79d9841c9b3c5bd3d6790863d1739190a9ab7b0",
+    "destination": "vendor/diffusion_policy/model/diffusion/mask_generator.py"
+  },
+  "/home/descfly/lcl_work/diffusion_policy/diffusion_policy/model/diffusion/conv1d_components.py": {
+    "sha256": "ea2aa10e297cf253bc1a1919ba47fe6ae32049b5eaaab292ed9cc145d8d2adc0",
+    "destination": "vendor/diffusion_policy/model/diffusion/conv1d_components.py"
+  },
+  "/home/descfly/lcl_work/diffusion_policy/diffusion_policy/model/diffusion/conditional_unet1d.py": {
+    "sha256": "8a95014f8aa52ade086f967c9018a66bf0c68f2133969c8f7a8522da01b472ac",
+    "destination": "vendor/diffusion_policy/model/diffusion/conditional_unet1d.py"
+  },
+  "/home/descfly/lcl_work/diffusion_policy/diffusion_policy/model/common/normalizer.py": {
+    "sha256": "92322852fc04d956d0dd43a2e41fb461dee246bbf97ddc7940186a9307525ed3",
+    "destination": "vendor/diffusion_policy/model/common/normalizer.py"
+  },
+  "/home/descfly/lcl_work/diffusion_policy/diffusion_policy/model/common/module_attr_mixin.py": {
+    "sha256": "658dececa20f7628960fc1a8db89e4be3693e1bba47f63d1ff8a4faa2d481e45",
+    "destination": "vendor/diffusion_policy/model/common/module_attr_mixin.py"
+  },
+  "/home/descfly/lcl_work/diffusion_policy/diffusion_policy/model/common/dict_of_tensor_mixin.py": {
+    "sha256": "158b63a244bcfb9aa377206730f5f59778c6aeb9138ff55c76d2c28ec46952d1",
+    "destination": "vendor/diffusion_policy/model/common/dict_of_tensor_mixin.py"
+  },
+  "/home/descfly/lcl_work/diffusion_policy/diffusion_policy/model/common/tensor_util.py": {
+    "sha256": "751b042aa5390ddf1f5b6220a465dfa20dbb9304e3c057f04512d6ee55f4e1b1",
+    "destination": "vendor/diffusion_policy/model/common/tensor_util.py"
+  },
+  "/home/descfly/lcl_work/diffusion_policy/diffusion_policy/common/pytorch_util.py": {
+    "sha256": "96ce50e191b4c837532529040af65d2b9a1f433f33a5187f8cf256b62d84b6b4",
+    "destination": "vendor/diffusion_policy/common/pytorch_util.py"
+  },
+  "/home/descfly/lcl_work/Convert_data/src/convest/dp/encoder.py": {
+    "sha256": "41e1b8cf80642c142913303d57e8720fac6a82f1226ba1a9b4e97a065c6d1c77",
+    "destination": "dp_deploy/encoder.py"
+  }
+}
