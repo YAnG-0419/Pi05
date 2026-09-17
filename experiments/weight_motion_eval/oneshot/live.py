@@ -1,5 +1,6 @@
 """One fresh inference to one finite trajectory through the device IPC bridge."""
 
+from collections import deque
 from dataclasses import asdict
 import json
 from pathlib import Path
@@ -23,10 +24,39 @@ class LiveConsumer:
         self.recorder, self.completed = recorder, 0
         self.requested = False
         self.player = None
+        self.dp3 = model.get("config") == "dp3_bimanual_franka_wuji"
+        self.history = deque(maxlen=model.get("observation_steps", 1))
+        self.next_history_stamp = None
         self.report = {"hardware_output": True, "model": model, "state": "waiting_for_fresh_observation"}
+
+    def model_observation(self, obs, metadata):
+        if not getattr(self, "dp3", False):
+            return obs
+        stamp = metadata["target_stamp"]
+        period = 1 / self.model["action_sample_hz"]
+        if self.next_history_stamp is not None and stamp + 0.005 < self.next_history_stamp:
+            return None
+        self.history.append((obs["point_cloud"], obs["observation/state"]))
+        if self.next_history_stamp is None:
+            self.next_history_stamp = stamp + period
+        else:
+            while self.next_history_stamp <= stamp + 0.005:
+                self.next_history_stamp += period
+        if len(self.history) < self.history.maxlen:
+            return None
+        return {
+            "point_cloud": np.stack([item[0] for item in self.history]),
+            "agent_pos": np.stack([item[1] for item in self.history]),
+        }
+
+    def checkpoint_digest(self):
+        return self.model.get("checkpoint_manifest_sha256", self.model.get("checkpoint_sha256"))
 
     def __call__(self, store, obs, metadata, directory):
         if self.requested:
+            return
+        obs = self.model_observation(obs, metadata)
+        if obs is None:
             return
         packet = self.codec.packb(obs)
         sent, wall = time.monotonic(), time.time()
@@ -48,7 +78,7 @@ class LiveConsumer:
         if isinstance(result, str):
             raise RuntimeError("Policy server returned an error: " + result)
         admission = Admission(
-            sent - max(ages), sent, received, uuid.uuid4().hex, self.model["checkpoint_manifest_sha256"], 0
+            sent - max(ages), sent, received, uuid.uuid4().hex, self.checkpoint_digest(), 0
         )
         admission.check()  # Before planning, serialization or device acquisition.
         actions = np.asarray(self.codec.unpackb(result)["actions"])
@@ -59,12 +89,11 @@ class LiveConsumer:
         plan = build_plan(actions, feedback.positions, self.config, self.limits, self.names)
         self.player = OneShot(plan, admission, time.monotonic())
         save_plan(plan, self.output / "plan")
+        artifact = {k: v for k, v in obs.items() if k != "prompt"}
+        if "prompt" in obs:
+            artifact["prompt"] = np.array(obs["prompt"])
         np.savez_compressed(
-            self.output / "live-inference.npz",
-            **{k: v for k, v in obs.items() if k != "prompt"},
-            prompt=np.array(obs["prompt"]),
-            actions=actions,
-            state_at_return=feedback.positions,
+            self.output / "live-inference.npz", **artifact, actions=actions, state_at_return=feedback.positions
         )
         self.report.update(
             state="prepared",

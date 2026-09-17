@@ -1,8 +1,10 @@
 """Independent execution strategies and pi05 checkpoint adapters, plus legacy presets."""
+
 from dataclasses import dataclass
 import importlib
 from pathlib import Path
 from types import MappingProxyType
+
 from fr3_wuji.paths import ROOT
 
 
@@ -29,6 +31,10 @@ class Profile:
     checkpoint: Path
     port: int
     planning_profile: str = "slow54"
+    action_horizon: int = 50
+    action_sample_hz: int = 30
+    observation_steps: int = 1
+    camera_profile: str = "rgb"
 
     @property
     def uri(self):
@@ -43,6 +49,12 @@ PROFILES = MappingProxyType({
     "slow64": Profile("slow64", "slow", "joint64", ROOT / "checkpoints/pi05/30000", 8002, "slow64"),
     "normal": Profile("normal", "normal", "joint54", ROOT / "checkpoints/pi05/19999", 8001),
 })
+
+# DP3 uses the proven slow hardware bridge, but not the pi05 policy server.
+DP3_PROFILE = Profile(
+    "dp3", "slow", "dp3", ROOT / "models/latest.ckpt", 8001,
+    action_horizon=8, action_sample_hz=20, observation_steps=4, camera_profile="dp3",
+)
 
 
 def get_profile(name):

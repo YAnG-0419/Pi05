@@ -1,7 +1,7 @@
-# client.py 已读取此配置，支持 replay / live-shadow；没有真机输出入口。
-# null 和 *_verified 项保留硬件设计待办，不是通过改布尔值就能开放执行的开关。
+# 此配置只供 client.py 的 replay / live-shadow；真机唯一入口是 bash deploy.sh dp3。
+# 下列 null / *_verified 是影子执行诊断项，不会打开或关闭 deployment.dp3 的硬件桥。
 schema_version: 1
-status: shadow_implemented_hardware_pending
+status: shadow_only
 mode: live_shadow
 hardware_output: false
 continuous_execution_enabled: false

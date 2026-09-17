@@ -40,26 +40,28 @@ def parse_args(argv=None, *, profile=None):
     parser.add_argument("--hand-control", choices=("slider", "strict"), default="slider")
     parser.add_argument("--continuous", action="store_true", help="Execute fresh prediction prefixes in one held session")
     parser.add_argument("--rounds", type=int, default=50)
-    parser.add_argument("--replan-steps", type=int, default=20)
+    parser.add_argument("--replan-steps", type=int, default=min(20, profile.action_horizon))
     parser.add_argument("--minimum-time-scale", type=float, default=2.5)
     parser.add_argument("--qualification", type=Path)
     parser.add_argument(
         "--supervised-trial",
         action="store_true",
-        help="One operator-supervised 50-step run without historical commissioning evidence",
+        help=f"One operator-supervised {profile.action_horizon}-step run without historical commissioning evidence",
     )
     parser.add_argument(
         "--output", type=Path, default=ROOT / "logs/weight_motion_eval" / ("deployment-" + uuid.uuid4().hex[:10])
     )
     args = parser.parse_args(argv)
-    if args.rounds < 1 or not 2 <= args.replan_steps <= 50:
-        parser.error("rounds must be positive; replan-steps must be between 2 and 50")
+    if args.rounds < 1 or not 2 <= args.replan_steps <= profile.action_horizon:
+        parser.error(f"rounds must be positive; replan-steps must be between 2 and {profile.action_horizon}")
     if not 1 <= args.minimum_time_scale <= 100:
         parser.error("minimum-time-scale must be between 1 and 100")
     if args.continuous and args.execute and not args.supervised_trial:
         parser.error("Continuous execution currently requires --supervised-trial")
     if args.supervised_trial and (not args.execute or args.qualification is not None):
         parser.error("--supervised-trial requires --execute and cannot be combined with --qualification")
+    if profile.camera_profile == "dp3" and args.execute and not args.start_cameras:
+        parser.error("DP3 execution requires --start-cameras so the validated depth/point-cloud profile is used")
     for value in (args.left_arm_ip, args.right_arm_ip):
         ipaddress.IPv4Address(value)
     for value in (args.wuji_left_address, args.wuji_right_address):
@@ -121,10 +123,10 @@ def main(argv=None, *, profile=None):
                     "hand_measured_speed_stop": args.hand_control == "strict",
                     "hand_current_limit_a": SLIDER_CURRENT_A if args.hand_control == "slider" else HAND_CURRENT_A,
                     "hand_contact_duration_s": HAND_CONTACT_SECONDS if args.hand_control == "slider" else None,
-                    "single_prediction_steps": 50,
+                    "single_prediction_steps": profile.action_horizon,
                     "continuous": args.continuous,
                     "rounds": args.rounds if args.continuous else 1,
-                    "execution_steps": args.replan_steps if args.continuous else 50,
+                    "execution_steps": args.replan_steps if args.continuous else profile.action_horizon,
                     "physical_stop_qualified": not args.supervised_trial,
                 },
                 indent=2,
@@ -202,10 +204,16 @@ def main(argv=None, *, profile=None):
             recorder_module = deployment_module("executor.async_recorder")
             recorder = recorder_module.AsyncRecorder(output)
             try:
-                config = read_config(ROOT / "experiments/weight_motion_eval/config.yaml", profile=profile.planning_profile)
+                config = read_config(
+                    ROOT / "experiments/weight_motion_eval/config.yaml",
+                    profile=profile.planning_profile,
+                    source_hz=profile.action_sample_hz,
+                )
                 config["hand_control"] = args.hand_control
                 config["minimum_time_scale"] = args.minimum_time_scale
                 config["hand_raw_initial_delta_rad"] = qualification.data["hand_raw_initial_delta_rad"]
+                config["prediction_steps"] = profile.action_horizon
+                config["execution_steps"] = args.replan_steps if args.continuous else profile.action_horizon
                 if args.continuous:
                     from experiments.weight_motion_eval.oneshot.continuous import ContinuousConsumer
                     consumer = ContinuousConsumer(devices, ws, model, config, limits, names, output, recorder,
@@ -227,13 +235,17 @@ def main(argv=None, *, profile=None):
                     str(output / "observation"),
                 ]
                 if args.start_cameras:
-                    options += ["--start-cameras", "--camera-profile", "rgb"]
+                    options += ["--start-cameras", "--camera-profile", profile.camera_profile]
                 print("【阶段】启动实时观测" + ("，等待相机稳定 35 秒" if args.start_cameras else ""), flush=True)
                 observe.main(options, consumer=consumer, single_shot=True)
                 if consumer.completed != 1:
                     raise RuntimeError("No fresh inference was admitted")
                 print(
-                    (f"{args.rounds} prediction rounds completed. " if args.continuous else "One 50-step trajectory completed. ")
+                    (
+                        f"{args.rounds} prediction rounds completed. "
+                        if args.continuous
+                        else f"One {profile.action_horizon}-step trajectory completed. "
+                    )
                     + (
                         "Hands holding; Ctrl-C stops and releases after feedback confirmation."
                         if args.finish_policy == "hold"
@@ -267,4 +279,3 @@ def main(argv=None, *, profile=None):
                     (output / "stop-request.json").write_text(
                         json.dumps({"physical_stop_confirmed": False, "error": str(error)}) + "\n"
                     )
-

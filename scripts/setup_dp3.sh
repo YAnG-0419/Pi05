@@ -9,4 +9,5 @@ else
 fi
 conda run -n "$env_name" python -m pip install \
     torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
-echo "DP3 environment ready: $env_name"
+bash "$root/fr3_wuji/setup.sh"
+echo "DP3 model environment and hardware client environment are ready: $env_name / $root/.venv"

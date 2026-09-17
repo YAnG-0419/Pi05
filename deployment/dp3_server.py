@@ -3,13 +3,13 @@
 import argparse
 import gc
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
 import sys
 
 import numpy as np
-
 
 OBS_STEPS = 4
 POINTS = 1024
@@ -133,15 +133,18 @@ def main(argv=None):
     metadata["device"] = str(device)
     if args.check_only:
         sys.path.insert(0, str(project))
-        import diffusers  # noqa: F401
-        import dill  # noqa: F401
-        import einops  # noqa: F401
-        import hydra  # noqa: F401
-        import msgpack  # noqa: F401
-        import websockets  # noqa: F401
-        import zarr  # noqa: F401
-        from diffusion_policy_3d.policy.dp3 import DP3  # noqa: F401
-        from openpi.serving.websocket_policy_server import WebsocketPolicyServer  # noqa: F401
+        for dependency in (
+            "diffusers",
+            "diffusion_policy_3d.policy.dp3",
+            "dill",
+            "einops",
+            "hydra",
+            "msgpack",
+            "openpi.serving.websocket_policy_server",
+            "websockets",
+            "zarr",
+        ):
+            importlib.import_module(dependency)
 
         print(json.dumps(metadata, indent=2))
         return

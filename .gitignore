@@ -172,6 +172,7 @@ cython_debug/
 
 # Deployment-local hardware configuration and preserved historical training outputs.
 /cameras.yaml
+/fr3_wuji/executor.dp3.local.yaml
 /archive/training/wandb/
 /models/
 *.ckpt

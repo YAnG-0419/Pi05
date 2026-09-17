@@ -290,7 +290,10 @@ class ContinuousConsumer(LiveConsumer):
 
     def consume(self, store, obs, metadata, directory):
         self.poll()
+        obs = self.model_observation(obs, metadata)
         if self.completed or self.pending or (self.process is not None and self.between is None):
+            return
+        if obs is None:
             return
         packet = self.codec.packb(obs)
         sent, wall = time.monotonic(), time.time()
@@ -309,7 +312,7 @@ class ContinuousConsumer(LiveConsumer):
         import uuid
 
         admission = Admission(
-            sent - max(ages), sent, received, uuid.uuid4().hex, self.model["checkpoint_manifest_sha256"], 0
+            sent - max(ages), sent, received, uuid.uuid4().hex, self.checkpoint_digest(), 0
         )
         admission.check()
         actions = np.asarray(self.codec.unpackb(result)["actions"])
@@ -326,8 +329,9 @@ class ContinuousConsumer(LiveConsumer):
         round_dir = self.output / f"round-{self.rounds_completed + 1:04d}"
         round_dir.mkdir()
         # Preserve the full prediction even when planning rejects its prefix.
+        state = obs["agent_pos"][-1] if getattr(self, "dp3", False) else obs["observation/state"]
         np.savez_compressed(round_dir / "inference.npz", actions=actions,
-                            state=obs["observation/state"], recorded_start=start)
+                            state=state, recorded_start=start)
         (round_dir / "admission.json").write_text(json.dumps(asdict(admission), indent=2) + "\n")
         try:
             plan = build_plan(actions, start, config, self.limits, self.names)
@@ -374,7 +378,11 @@ class ContinuousConsumer(LiveConsumer):
         else:
             self.incoming.put_nowait(player)
         self.pending = True
-        print(f"【阶段】第 {self.rounds_completed + 1} 轮计划就绪：预测 50 步，执行前 {len(plan.raw)} 步", flush=True)
+        print(
+            f"【阶段】第 {self.rounds_completed + 1} 轮计划就绪："
+            f"预测 {len(actions)} 步，执行前 {len(plan.raw)} 步",
+            flush=True,
+        )
 
     def close(self):
         self.stop_event.set()

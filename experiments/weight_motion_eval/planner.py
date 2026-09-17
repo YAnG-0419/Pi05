@@ -29,8 +29,8 @@ def validate_config(config):
         raise ValueError("Unsupported configuration")
     if config.get("hardware_output") is not False:
         raise ValueError("Hardware output is unavailable in this tool")
-    if config.get("source_hz") != 30:
-        raise ValueError("The recorded policy uses 30 Hz")
+    if config.get("source_hz") not in {20, 30}:
+        raise ValueError("The policy source rate must be 20 or 30 Hz")
     project_hands = config.get("project_hand_predictions", False)
     if type(project_hands) is not bool or (project_hands and config.get("hand_control") != "slider"):
         raise ValueError("Hand prediction projection requires slider mode and a boolean flag")
@@ -61,8 +61,9 @@ def validate_config(config):
     return config
 
 
-def read_config(path, *, profile="slow54"):
+def read_config(path, *, profile="slow54", source_hz=30):
     config = yaml.safe_load(Path(path).read_text())
+    config["source_hz"] = source_hz
     # Validate the shared base before applying the selected profile's existing limits.
     validate_config(config)
     if profile not in {"slow54", "slow64"}:
@@ -170,7 +171,10 @@ class Plan:
 
 def build_plan(raw, start, config, limits, names):
     validate_config(config)
-    raw, start = checked_array(raw, (50, 54)), checked_array(start, (54,))
+    predicted = config.get("prediction_steps", 50)
+    if type(predicted) is not int or not 2 <= predicted <= 50:
+        raise ValueError("prediction_steps must be between 2 and 50")
+    raw, start = checked_array(raw, (predicted, 54)), checked_array(start, (54,))
     for key in ("lower", "upper", "speed"):
         limits[key] = checked_array(limits[key], (54,))
     if np.any(limits["lower"] >= limits["upper"]) or np.any(limits["speed"] <= 0):
@@ -181,12 +185,12 @@ def build_plan(raw, start, config, limits, names):
         if np.any(caps(config, phase, "velocity") > limits["speed"]):
             raise ValueError("Planning velocity exceeds existing reference limits")
     steps = config.get("execution_steps", 50)
-    if type(steps) is not int or not 2 <= steps <= 50:
-        raise ValueError("execution_steps must be between 2 and 50")
+    if type(steps) is not int or not 2 <= steps <= predicted:
+        raise ValueError(f"execution_steps must be between 2 and {predicted}")
     discarded = raw[steps:]
     discarded_violations = np.argwhere((discarded < limits["lower"]) | (discarded > limits["upper"]))
     ignored_joint_limits = {
-        "steps": 50 - steps,
+        "steps": predicted - steps,
         "violation_count": len(discarded_violations),
         "examples": [
             {"step": int(row) + steps + 1, "joint_name": names[int(joint)],
@@ -245,8 +249,8 @@ def build_plan(raw, start, config, limits, names):
             "raw_initial_delta_rad": initial,
             "raw_acquisition_limit_rad": threshold,
             "max_knot_modification_rad": modification,
-            "raw_velocity_max_rad_s": float(np.abs(np.diff(raw[:, section], axis=0)).max() * 30),
-            "raw_acceleration_max_rad_s2": float(np.abs(np.diff(raw[:, section], n=2, axis=0)).max() * 900) if len(raw) > 2 else 0.0,
+            "raw_velocity_max_rad_s": float(np.abs(np.diff(raw[:, section], axis=0)).max() * config["source_hz"]),
+            "raw_acceleration_max_rad_s2": float(np.abs(np.diff(raw[:, section], n=2, axis=0)).max() * config["source_hz"] ** 2) if len(raw) > 2 else 0.0,
         }
     # Two knots plus rest velocity/acceleration boundary conditions define the
     # quintic approach; all 54 joints share its duration.
@@ -254,7 +258,9 @@ def build_plan(raw, start, config, limits, names):
     if config.get("hand_control") == "slider":
         # Give the slider command time to traverse the initial hand distance.
         approach.scale = max(approach.scale, float(delta[np.r_[7:27, 34:54]].max()))
-    playback = make_phase("playback", np.arange(len(raw)) / 30, knots, config, limits, config["minimum_time_scale"])
+    playback = make_phase(
+        "playback", np.arange(len(raw)) / config["source_hz"], knots, config, limits, config["minimum_time_scale"]
+    )
     total = approach.duration + playback.duration + 2 * config["settle_seconds"]
     if total > config["max_total_seconds"]:
         raise ValueError(f"Required plan duration {total:.3f}s exceeds experiment limit; do not truncate")
@@ -284,7 +290,7 @@ def build_plan(raw, start, config, limits, names):
             "hardware_transport_and_final_deadline",
             "physical_tracking_and_stop",
         ],
-        "source_hz": 30,
+        "source_hz": config["source_hz"],
         "sample_hz": config["sample_hz"],
         "joint_names": names,
         "approach_seconds": approach.duration,
