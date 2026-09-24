@@ -29,6 +29,33 @@ def test_weighted_concat_dataset_sampling():
     np.testing.assert_allclose(np.mean(sampled < 65), 0.4, atol=0.015)
 
 
+def test_left_enhancement_config_and_sampling():
+    config = _config.get_config("pi05_fr3_wuji_left_enhance")
+    base = _config.get_config("pi05_fr3_wuji")
+    specs = config.data.lerobot_datasets
+
+    assert config.model == base.model
+    assert config.weight_loader == base.weight_loader
+    assert config.batch_size == 8
+    assert config.num_train_steps == 20_000
+    assert config.data.repo_id == config.data.assets.asset_id
+    assert [spec.weight for spec in specs] == [0.8, 0.2]
+
+    # Clip duration can be much shorter than complete episodes; each dataset
+    # still receives its configured share of draws, independent of frame count.
+    dataset = _data_loader.WeightedConcatDataset([range(300_000), range(4_000)], [spec.weight for spec in specs])
+    np.testing.assert_allclose(dataset.sample_weights[:300_000].sum(), 0.8)
+    np.testing.assert_allclose(dataset.sample_weights[300_000:].sum(), 0.2)
+    sampler = torch.utils.data.WeightedRandomSampler(
+        torch.as_tensor(dataset.sample_weights),
+        num_samples=20_000,
+        replacement=True,
+        generator=torch.Generator().manual_seed(config.seed),
+    )
+    sampled = np.fromiter(sampler, dtype=np.int64)
+    np.testing.assert_allclose(np.mean(sampled >= 300_000), 0.2, atol=0.015)
+
+
 def test_torch_data_loader():
     config = pi0_config.Pi0Config(action_dim=24, action_horizon=50, max_token_len=48)
     dataset = _data_loader.FakeDataset(config, 16)

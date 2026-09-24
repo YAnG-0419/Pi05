@@ -1142,6 +1142,25 @@ _CONFIGS.append(
     )
 )
 
+# Emphasize the left-hand picking phase while preserving complete demonstrations.
+# WeightedConcatDataset normalizes each source by its frame count, so the short
+# clips receive 20% of training draws in expectation, independent of their length.
+_CONFIGS.append(
+    dataclasses.replace(
+        _fr3_wuji_base,
+        name="pi05_fr3_wuji_left_enhance",
+        data=dataclasses.replace(
+            _fr3_wuji_base.data,
+            repo_id="fr3_wuji/tomato_full_300_left_20",
+            assets=AssetsConfig(asset_id="fr3_wuji/tomato_full_300_left_20"),
+            lerobot_datasets=(
+                LeRobotDatasetSpec(repo_id="fr3_wuji/tomato_full_300", weight=0.8),
+                LeRobotDatasetSpec(repo_id="fr3_wuji/tomato_left_20", weight=0.2),
+            ),
+        ),
+    )
+)
+
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")
 _CONFIGS_DICT = {config.name: config for config in _CONFIGS}
