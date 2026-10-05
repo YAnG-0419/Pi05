@@ -1,53 +1,53 @@
-# 左手摘番茄强化训练
+# 左手摘番茄强化训练（2026-09-26）
 
-配置名：`pi05_fr3_wuji_left_enhance`。从 `pi05_base` 开始 LoRA 微调，使用约 300 条完整示范和从中裁出的 20 条左手阶段片段。现有加权采样器按帧数归一化每个数据集：完整数据占抽样期望的 80%，左手片段占 20%。这是整个训练过程的期望比例，单个 batch 不保证至少 20%。
+配置：`pi05_fr3_wuji_left_enhance`，从官方 `pi05_base` 开始 LoRA 训练，30 Hz、54 维动作、50 步动作窗口、batch size 8、20,000 步。当前分支 `left-train-enhance`，修改未经提交。
 
-## 数据准备
+## 数据和采样
 
-将两套数据分别保存为标准 LeRobot 数据集，或把服务器上的实际目录软链接到 LeRobot 缓存：
+| 数据 | Episode | 帧数 | 抽样期望比例 | 实际目录 |
+| --- | ---: | ---: | ---: | --- |
+| 完整 A | 106 | 117995 | 53.33% | `/home/descfly/company-remote-2/real/harvest-tomato/datasets-pi05/0924-250ep/A` |
+| 完整 B | 144 | 209919 | 26.67% | `/home/descfly/company-remote-2/real/harvest-tomato/datasets-pi05/0924-250ep/B` |
+| 左手 A | 20 | 12858 | 13.33% | `/home/descfly/LTT/Left_only_exports/A` |
+| 左手 B | 9 | 7737 | 6.67% | `/home/descfly/LTT/Left_only_exports/B` |
 
-| 用途 | `repo_id` | 默认本地目录 |
-| --- | --- | --- |
-| 完整示范 | `fr3_wuji/tomato_full_300` | `~/.cache/huggingface/lerobot/fr3_wuji/tomato_full_300` |
-| 左手阶段片段 | `fr3_wuji/tomato_left_20` | `~/.cache/huggingface/lerobot/fr3_wuji/tomato_left_20` |
+完整数据合计 80%，左手阶段合计 20%；各组内部 A:B=2:1。质量分级通过抽样次数体现，学习率共用。每个数据源按其帧数归一化，不保证逐 batch 比例。工程已在本地 LeRobot 缓存建立四个软链接，远端源数据未修改。PyAV 后端避开当前环境的 TorchCodec/FFmpeg 加载错误。
 
-左手片段作为独立 episode 保存，不修改或移除完整示范。每段从右手已拿起番茄、左手准备摘取的观测开始，覆盖左手摘取的完整动作。两套数据均须采用 30 Hz、`observation.state` 108 维、`action` 54 维，以及 `observation.images.cam0`、`cam1`、`cam2` 三路 RGB。state 和 action 保留现有 FR3/Wuji 原始顺序；在线 transform 负责切片和重排。所有 episode 的任务文本必须与部署时相同：
+## 按顺序运行
 
-```text
-Pick up a tomato truss with the right hand, then pick a cherry tomato with the left hand and place it in the left basket.
-```
+2026-09-26 已完成数据预检和统计计算：348509 帧、837 个 LeRobot 对照样本通过。当前可直接从短程训练开始，以下预检/统计命令用于复查或数据更新后重算。
 
-数据就位后先运行：
-
-```bash
-uv run python -m examples.fr3_wuji.check_left_enhance_data
-```
-
-脚本会核对元数据、每条左手片段首/中/尾的图像解码和向量形状，并以固定种子抽样 20,000 次确认左手数据比例约为 20%。还需人工查看片段首尾画面，确认右手已拿起、左手动作完整、三个相机时间对齐；脚本只能检查可解码性和数据结构，不能判断动作语义。如果实际清洗结果的列名、维度或动作顺序不同，先修改数据转换或 policy transform，再计算统计量。
-
-## 归一化与训练
-
-新配置使用独立统计目录 `assets/pi05_fr3_wuji_left_enhance/fr3_wuji/tomato_full_300_left_20/`。两套数据实际内容确定后运行：
+在仓库根目录执行。首次训练前重新计算四个来源的归一化统计量，统计量不按训练抽样权重加权：
 
 ```bash
-JAX_PLATFORMS=cpu uv run examples/fr3_wuji/compute_norm_stats.py \
-  --config-name pi05_fr3_wuji_left_enhance
+cd /home/descfly/LTT/pi05
+JAX_PLATFORMS=cpu uv run --no-sync python -m examples.fr3_wuji.check_left_enhance_data
+JAX_PLATFORMS=cpu uv run --no-sync examples/fr3_wuji/compute_norm_stats.py --config-name pi05_fr3_wuji_left_enhance
 ```
 
-该脚本覆盖两套数据的全部帧，在 54 维在线变换后计算统计量；采样权重仅控制训练抽样，不用于统计量加权。脚本会拒绝覆盖已存在的统计文件。数据内容变化时，先移走旧统计目录，再重新计算；不要复用旧番茄模型的统计量。
+统计目录为 `assets/pi05_fr3_wuji_left_enhance/fr3_wuji/tomato_full_250_left_29/`。统计脚本拒绝覆盖已有文件；再次训练相同数据不必重算。数据变化时先归档旧统计，再重新计算。
 
-先用新实验名做短程检查，再启动完整训练：
+短程训练（与正式实验使用不同目录）：
 
 ```bash
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_fr3_wuji_left_enhance \
-  --exp-name left_enhance_smoke --num-train-steps 20 --save-interval 10
-
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_fr3_wuji_left_enhance \
-  --exp-name left_enhance_300plus20
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run --no-sync scripts/train.py pi05_fr3_wuji_left_enhance --exp-name left_smoke_0926 --num-train-steps 20 --save-interval 10 --log-interval 1
 ```
 
-正式配置沿用 batch size 8、20,000 步、每 2,000 步保存一次，默认不启用 WandB。检查短程训练的 loss 为有限数、checkpoint 已保存，并用该 checkpoint 推理确认输出动作形状为 `(50, 54)`。不要用 `--overwrite` 覆盖已有实验。
+若短程 loss 有限且 checkpoint 保存成功，再正式训练：
 
-## 效果验证
+```bash
+uv run --no-sync wandb login
+mkdir -p logs
+set -o pipefail
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run --no-sync scripts/train.py pi05_fr3_wuji_left_enhance --exp-name left_enhance_0926 --wandb-enabled --log-interval 10 2>&1 | tee logs/left_enhance_0926.log
+```
 
-在相同场景和任务指令下，分别记录现有模型与新模型的右手拿取、左手摘取成功率。左手成功率提高且右手表现未明显退步，才视为强化有效；训练 loss 不能替代真机评估。此次只训练混合组，不额外训练完整数据单独对照组。
+基础权重缺失时首次训练会自动下载。实验名已存在时换一个新名字，勿用 `--overwrite`。如需恢复正式实验，用相同命令加 `--resume`；20,000 是总训练步数。
+
+## 查看过程和验证效果
+
+启动正式训练后，打开终端打印的 WandB run 链接，在 Workspace 添加 `loss`、`grad_norm`、`param_norm` 图表，横轴选择 Step。loss 是训练集上的整体平均损失，尚未拆分 A/B 或左右手，不能单独证明左手改善。终端每 10 步也打印指标；另一个终端可运行 `tail -f logs/left_enhance_0926.log` 查看日志。
+
+不连接 WandB 时去掉 `--wandb-enabled`，终端日志仍可用。`WANDB_MODE=offline` 可离线保存 WandB 日志，稍后联网通过 `uv run --no-sync wandb sync <offline-run目录>` 上传再查看曲线。
+
+训练前人工检查裁剪片段的首尾和三路视频同步。最终用固定场景比较现有模型与新模型的右手拿取和左手摘取成功率。

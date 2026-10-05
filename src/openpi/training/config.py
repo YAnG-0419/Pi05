@@ -110,6 +110,7 @@ class DataConfig:
     # LeRobot-style datasets that cannot be opened by the installed LeRobot API.
     local_dataset_loader: str | None = None
     local_dataset_video_keys: Sequence[str] = ()
+    video_backend: str | None = None
 
     # Optional weighted mixture of standard LeRobot datasets. When empty, repo_id
     # identifies the single dataset. For a mixture, repo_id is its logical asset ID.
@@ -1151,11 +1152,14 @@ _CONFIGS.append(
         name="pi05_fr3_wuji_left_enhance",
         data=dataclasses.replace(
             _fr3_wuji_base.data,
-            repo_id="fr3_wuji/tomato_full_300_left_20",
-            assets=AssetsConfig(asset_id="fr3_wuji/tomato_full_300_left_20"),
+            repo_id="fr3_wuji/tomato_full_250_left_29",
+            base_config=DataConfig(prompt_from_task=True, video_backend="pyav"),
+            assets=AssetsConfig(asset_id="fr3_wuji/tomato_full_250_left_29"),
             lerobot_datasets=(
-                LeRobotDatasetSpec(repo_id="fr3_wuji/tomato_full_300", weight=0.8),
-                LeRobotDatasetSpec(repo_id="fr3_wuji/tomato_left_20", weight=0.2),
+                LeRobotDatasetSpec(repo_id="fr3_wuji/tomato_full_A", weight=8 / 15),
+                LeRobotDatasetSpec(repo_id="fr3_wuji/tomato_full_B", weight=4 / 15),
+                LeRobotDatasetSpec(repo_id="fr3_wuji/tomato_left_A", weight=2 / 15),
+                LeRobotDatasetSpec(repo_id="fr3_wuji/tomato_left_B", weight=1 / 15),
             ),
         ),
     )

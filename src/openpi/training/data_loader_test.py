@@ -39,11 +39,14 @@ def test_left_enhancement_config_and_sampling():
     assert config.batch_size == 8
     assert config.num_train_steps == 20_000
     assert config.data.repo_id == config.data.assets.asset_id
-    assert [spec.weight for spec in specs] == [0.8, 0.2]
+    np.testing.assert_allclose([spec.weight for spec in specs], [8 / 15, 4 / 15, 2 / 15, 1 / 15])
+    assert config.data.base_config.video_backend == "pyav"
 
     # Clip duration can be much shorter than complete episodes; each dataset
     # still receives its configured share of draws, independent of frame count.
-    dataset = _data_loader.WeightedConcatDataset([range(300_000), range(4_000)], [spec.weight for spec in specs])
+    dataset = _data_loader.WeightedConcatDataset(
+        [range(300_000), range(4_000)], [sum(spec.weight for spec in specs[:2]), sum(spec.weight for spec in specs[2:])]
+    )
     np.testing.assert_allclose(dataset.sample_weights[:300_000].sum(), 0.8)
     np.testing.assert_allclose(dataset.sample_weights[300_000:].sum(), 0.2)
     sampler = torch.utils.data.WeightedRandomSampler(

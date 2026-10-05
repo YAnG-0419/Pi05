@@ -52,6 +52,7 @@ def _check_dataset(repo_id: str, data_config, horizon: int, *, all_episodes: boo
 
     dataset = LeRobotDataset(
         repo_id,
+        video_backend=data_config.video_backend,
         delta_timestamps={"action": [step / meta.fps for step in range(horizon)]},
     )
     if len(dataset) != meta.total_frames:
@@ -101,14 +102,14 @@ def main(config_name: str = "pi05_fr3_wuji_left_enhance", draws: int = 20_000):
     config = training_config.get_config(config_name)
     data_config = config.data.create(config.assets_dirs, config.model)
     specs = data_config.lerobot_datasets
-    if len(specs) != 2 or not np.allclose([spec.weight for spec in specs], [0.8, 0.2]):
+    if len(specs) != 4 or not np.allclose([spec.weight for spec in specs], [8 / 15, 4 / 15, 2 / 15, 1 / 15]):
         raise ValueError("Expected complete/left-only datasets with 80/20 weights")
     datasets = [
-        _check_dataset(spec.repo_id, data_config, config.model.action_horizon, all_episodes=(i == 1))
+        _check_dataset(spec.repo_id, data_config, config.model.action_horizon, all_episodes=(i >= 2))
         for i, spec in enumerate(specs)
     ]
-    if datasets[1].meta.total_episodes != 20:
-        raise ValueError(f"Expected 20 left-only clips, got {datasets[1].meta.total_episodes}")
+    if sum(dataset.meta.total_episodes for dataset in datasets[2:]) != 29:
+        raise ValueError("Expected 29 left-only clips across A and B")
     mixture = data_loader.WeightedConcatDataset(datasets, [spec.weight for spec in specs])
     sampler = torch.utils.data.WeightedRandomSampler(
         torch.as_tensor(mixture.sample_weights, dtype=torch.double),
@@ -116,7 +117,7 @@ def main(config_name: str = "pi05_fr3_wuji_left_enhance", draws: int = 20_000):
         replacement=True,
         generator=torch.Generator().manual_seed(config.seed),
     )
-    left_rate = sum(index >= len(datasets[0]) for index in sampler) / draws
+    left_rate = sum(index >= sum(len(dataset) for dataset in datasets[:2]) for index in sampler) / draws
     print(f"Left-only sampling: {left_rate:.2%} over {draws} seeded draws (expected 20%)")
     if abs(left_rate - 0.2) > 0.02:
         raise ValueError("Observed left-only sampling rate differs from 20% by more than 2 points")
