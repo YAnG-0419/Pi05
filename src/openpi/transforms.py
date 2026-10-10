@@ -102,6 +102,16 @@ class RepackTransform(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class OverridePrompt(DataTransformFn):
+    """Use one task prompt even when a sample carries a stage-specific prompt."""
+
+    prompt: str
+
+    def __call__(self, data: DataDict) -> DataDict:
+        return {**data, "prompt": np.asarray(self.prompt)}
+
+
+@dataclasses.dataclass(frozen=True)
 class InjectDefaultPrompt(DataTransformFn):
     prompt: str | None
 

@@ -16,6 +16,15 @@ def test_repack_transform():
     assert transform(item) == {"a": {"b": 1}, "d": 2}
 
 
+def test_override_prompt_replaces_stage_without_mutating_sample():
+    transform = _transforms.OverridePrompt("complete task")
+    source = {"prompt": "stage one", "state": np.zeros(54)}
+    result = transform(source)
+    assert result["prompt"].item() == "complete task"
+    assert source["prompt"] == "stage one"
+    assert transform({})["prompt"].item() == "complete task"
+
+
 def test_delta_actions():
     item = {"state": np.array([1, 2, 3]), "actions": np.array([[3, 4, 5], [5, 6, 7]])}
 

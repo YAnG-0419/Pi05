@@ -398,6 +398,8 @@ class LeRobotFr3WujiDataConfig(DataConfigFactory):
     lerobot_datasets: Sequence[LeRobotDatasetSpec] = ()
     action_hz: float | None = None
     video_backend: str | None = None
+    # Applied before repacking; deliberately replaces existing stage prompts.
+    prompt_override: str | None = None
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -415,6 +417,10 @@ class LeRobotFr3WujiDataConfig(DataConfigFactory):
                 )
             ]
         )
+        if self.prompt_override is not None:
+            repack_transform = _transforms.Group(
+                inputs=[_transforms.OverridePrompt(self.prompt_override), *repack_transform.inputs],
+            )
         data_transforms = _transforms.Group(
             inputs=[fr3_wuji_policy.Fr3WujiInputs(model_type=model_config.model_type)],
             outputs=[fr3_wuji_policy.Fr3WujiOutputs()],
@@ -1105,10 +1111,48 @@ _CONFIGS.append(
     )
 )
 
-# Local 2026-09-18 A/B collection. Source media and observations are 30 Hz;
-# future action targets are selected on a nearest-frame 20 Hz time grid. This
-# gives a 50-step, 2.5-second policy trajectory without re-encoding the videos.
+# Local 2026-09-18 A/B collection. Source media and observations are 30 Hz.
 _FR3_WUJI_0918_ROOT = "/home/descfly/lpy/Convert_data/outputs/fr3_wuji/0918"
+
+# Reproducible native-30-Hz version of the historical 0918 A/B LoRA run.
+# Keep this separate from pi05_fr3_wuji_weighted: that general-purpose config
+# has since moved on to a different 40/60 dataset mixture.
+_CONFIGS.append(
+    dataclasses.replace(
+        _fr3_wuji_base,
+        name="pi05_fr3_wuji_0918_a70_b30_30hz",
+        data=dataclasses.replace(
+            _fr3_wuji_base.data,
+            repo_id="fr3_wuji/0918",
+            assets=AssetsConfig(
+                assets_dir="/home/descfly/lpy/Convert_data/outputs/fr3_wuji",
+                asset_id="0918",
+            ),
+            # Both source datasets are 30 Hz. Setting this explicitly makes the
+            # 50-step action horizon span the same ~1.67 s as the original run.
+            action_hz=30.0,
+            video_backend="pyav",
+            lerobot_datasets=(
+                LeRobotDatasetSpec(
+                    repo_id="fr3_wuji/tomato_A_cleaned",
+                    root=f"{_FR3_WUJI_0918_ROOT}/tomato_A_cleaned",
+                    weight=0.7,
+                ),
+                LeRobotDatasetSpec(
+                    repo_id="fr3_wuji/tomato_B_cleaned",
+                    root=f"{_FR3_WUJI_0918_ROOT}/tomato_B_cleaned",
+                    weight=0.3,
+                ),
+            ),
+        ),
+        log_interval=10,
+        wandb_enabled=True,
+    )
+)
+
+# Alternate view of the same source data: future action targets are selected
+# on a nearest-frame 20 Hz time grid. This gives a 50-step, 2.5-second policy
+# trajectory without re-encoding the videos.
 _CONFIGS.append(
     dataclasses.replace(
         _fr3_wuji_base,
