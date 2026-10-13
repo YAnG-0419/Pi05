@@ -5,6 +5,7 @@ import time
 from types import SimpleNamespace
 
 import numpy as np
+from openpi_client import rtc
 import pytest
 
 from deploy.fr3_wuji_fast import deploy
@@ -72,6 +73,160 @@ def test_stale_observation_is_not_sent_and_request_remains_pending(tmp_path):
         consumer.close()
 
 
+def test_unsolicited_rtc_receipt_on_raw_request_is_rejected_without_installing(tmp_path):
+    from openpi_client import msgpack_numpy
+
+    context = rtc.validate_context(
+        {
+            "protocol_version": 1,
+            "token": "unexpected-rtc-receipt",
+            "source_number": 1,
+            "source_sha256": "a" * 64,
+            "previous_actions": np.zeros((25, 54), dtype=np.float32),
+            "inference_delay_steps": 5,
+            "prefix_attention_horizon": 25,
+            "prefix_attention_schedule": "exp",
+            "max_guidance_weight": 5.0,
+        }
+    )
+    response = msgpack_numpy.packb(
+        {"actions": np.zeros((50, 54), dtype=np.float32), rtc.RTC_RECEIPT_KEY: rtc.make_receipt(context)}
+    )
+    consumer = make_consumer(tmp_path, response)
+    try:
+        with pytest.raises(ValueError, match="Unexpected RTC receipt"):
+            consumer(
+                None,
+                {"observation/state": np.zeros(54)},
+                {"samples": {"camera": {"stamp": time.time()}}},
+                tmp_path,
+            )
+        assert consumer.process is None
+        assert consumer.stop_flag.is_set()
+    finally:
+        consumer.close()
+
+
+def test_observation_that_expires_during_packet_preparation_is_not_sent(tmp_path, monkeypatch):
+    clock = {"monotonic": 100.0, "wall": time.time()}
+    fake_time = SimpleNamespace(
+        time=lambda: clock["wall"],
+        monotonic=lambda: clock["monotonic"],
+    )
+    monkeypatch.setattr("deploy.fr3_wuji_fast.consumer.time", fake_time)
+    consumer = make_consumer(tmp_path, "unused")
+    original_codec = consumer.codec
+
+    class SlowCodec:
+        def packb(self, payload):
+            clock["monotonic"] += 0.08
+            clock["wall"] += 0.08
+            return original_codec.packb(payload)
+
+    consumer.codec = SlowCodec()
+    consumer.options["mode"] = "rtc"
+    consumer.request = {
+        "event": "infer",
+        "number": 2,
+        "triggered_at": 100.0,
+        "rtc_token": "rtc-request-2",
+        "rtc_source_number": 1,
+        "rtc_source_sha256": "a" * 64,
+        "rtc_reference_time": 100.0,
+        "rtc_previous_actions": np.zeros((25, 54)).tolist(),
+    }
+    try:
+        consumer(
+            None,
+            {"observation/state": np.zeros(54)},
+            {"samples": {"camera": {"stamp": clock["wall"]}}},
+            tmp_path,
+        )
+        assert not consumer.ws.sent
+        assert consumer.request["number"] == 2
+        assert not consumer.stop_flag.is_set()
+    finally:
+        consumer.close()
+
+
+def test_rtc_followup_sends_bound_prefix_envelope_and_requires_receipt(tmp_path, monkeypatch):
+    from openpi_client import msgpack_numpy
+
+    token = "rtc-request-2"
+    source_sha256 = "a" * 64
+    reference = np.tile(np.arange(25, dtype=np.float32)[:, None], (1, 54))
+    expected_context = rtc.validate_context(
+        {
+            "protocol_version": 1,
+            "token": token,
+            "source_number": 1,
+            "source_sha256": source_sha256,
+            "previous_actions": reference,
+            "inference_delay_steps": 5,
+            "prefix_attention_horizon": 25,
+            "prefix_attention_schedule": "exp",
+            "max_guidance_weight": 5.0,
+        }
+    )
+    response = msgpack_numpy.packb(
+        {"actions": np.zeros((50, 54), dtype=np.float32), "rtc": rtc.make_receipt(expected_context)}
+    )
+    consumer = make_consumer(tmp_path, response)
+    fake_time = SimpleNamespace(time=time.time, monotonic=lambda: 100.0)
+    monkeypatch.setattr("deploy.fr3_wuji_fast.consumer.time", fake_time)
+    consumer.options.update(
+        mode="rtc",
+        rtc_initial_delay_steps=5,
+        rtc_delay_buffer_size=10,
+        rtc_prefix_attention_schedule="exp",
+        rtc_max_guidance_weight=5.0,
+    )
+    consumer.request = {
+        "event": "infer",
+        "number": 2,
+        "triggered_at": 99.999,
+        "rtc_token": token,
+        "rtc_source_number": 1,
+        "rtc_source_sha256": source_sha256,
+        "rtc_reference_time": 99.999,
+        "rtc_previous_actions": reference.tolist(),
+    }
+
+    class LiveProcess:
+        alive = True
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, timeout):
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+    consumer.process = LiveProcess()
+    try:
+        consumer(
+            None,
+            {"observation/state": np.zeros(54)},
+            {"samples": {"camera": {"stamp": time.time()}}},
+            tmp_path,
+        )
+        payload = msgpack_numpy.unpackb(consumer.ws.sent[0])
+        observation, context = rtc.unwrap_request(payload)
+        assert observation["observation/state"].shape == (54,)
+        assert context is not None
+        assert context.token == token
+        assert context.source_sha256 == source_sha256
+        assert context.inference_delay_steps == 5
+        assert context.previous_actions[0, 0] == pytest.approx(0.03)
+        assert list(consumer.rtc_delay_steps) == [5]
+        saved = json.loads((tmp_path / "chunk-0002/admission.json").read_text())
+        assert saved["rtc"]["receipt"]["token"] == token
+    finally:
+        consumer.close()
+
+
 def test_wrong_model_metadata_rejected_before_controllers_start(tmp_path, monkeypatch):
     from openpi_client import msgpack_numpy
     import websockets.sync.client
@@ -102,3 +257,21 @@ def test_wrong_model_metadata_rejected_before_controllers_start(tmp_path, monkey
         deploy.main(["--execute", "--supervised-trial"])
     assert not (output / "commands.json").exists()
     assert json.loads((output / "fast-config.json").read_text())["hardware_output"] is True
+
+
+def test_rtc_requires_declared_protocol_capability_and_guided_warmup():
+    expected = {"checkpoint_manifest_sha256": "weights"}
+    legacy = {**expected, "warmed_up": True}
+    deploy.check_model_metadata(legacy, expected, broker_mode="rtg", rtc_schedule="exp")
+    with pytest.raises(ValueError, match="RTC-warmed"):
+        deploy.check_model_metadata(legacy, expected, broker_mode="rtc", rtc_schedule="exp")
+
+    rtc_model = {
+        **legacy,
+        "rtc_supported": True,
+        "rtc_protocol_version": 1,
+        "rtc_algorithm": "soft_prefix_guidance",
+        "rtc_warmed_up": True,
+        "rtc_prefix_attention_schedules": ["exp"],
+    }
+    deploy.check_model_metadata(rtc_model, expected, broker_mode="rtc", rtc_schedule="exp")

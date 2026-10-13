@@ -2,6 +2,7 @@
 """Independent normal-speed 19999 deployment. Default: offline configuration check."""
 
 import argparse
+from collections.abc import Mapping
 from contextlib import ExitStack
 import copy
 import fcntl
@@ -54,10 +55,18 @@ def parse_args(argv=None):
     parser.add_argument("--wuji-right-address", default="192.168.2.111:7447")
     parser.add_argument("--start-cameras", action="store_true")
     parser.add_argument("--finish-policy", choices=("hold", "disable"), default="disable")
-    parser.add_argument("--broker-mode", choices=("rtg", "serial"), default="rtg")
+    parser.add_argument("--broker-mode", choices=("rtg", "rtc", "serial"), default="rtg")
     parser.add_argument("--rounds", type=int, default=50, help="Finite number of admitted model chunks")
     parser.add_argument("--guidance-steps", type=int, default=3)
     parser.add_argument("--trigger-fraction", type=float, default=0.5)
+    parser.add_argument("--rtc-initial-delay-steps", type=int, default=5)
+    parser.add_argument("--rtc-delay-buffer-size", type=int, default=10)
+    parser.add_argument(
+        "--rtc-prefix-attention-schedule",
+        choices=("ones", "zeros", "linear", "exp"),
+        default="exp",
+    )
+    parser.add_argument("--rtc-max-guidance-weight", type=float, default=5.0)
     parser.add_argument("--supervised-trial", action="store_true")
     parser.add_argument("--qualification", type=Path)
     parser.add_argument(
@@ -100,7 +109,28 @@ def stream_options(args):
         "mode": args.broker_mode,
         "guidance_steps": args.guidance_steps,
         "trigger_fraction": args.trigger_fraction,
+        "rtc_initial_delay_steps": args.rtc_initial_delay_steps,
+        "rtc_delay_buffer_size": args.rtc_delay_buffer_size,
+        "rtc_prefix_attention_schedule": args.rtc_prefix_attention_schedule,
+        "rtc_max_guidance_weight": args.rtc_max_guidance_weight,
     }
+
+
+def check_model_metadata(model, expected, *, broker_mode, rtc_schedule):
+    if not isinstance(model, Mapping):
+        raise ValueError("Wrong 19999 checkpoint/normalization or model server not warmed up")
+    if any(model.get(key) != value for key, value in expected.items()) or model.get("warmed_up") is not True:
+        raise ValueError("Wrong 19999 checkpoint/normalization or model server not warmed up")
+    schedules = model.get("rtc_prefix_attention_schedules")
+    if broker_mode == "rtc" and (
+        model.get("rtc_supported") is not True
+        or model.get("rtc_protocol_version") != 1
+        or model.get("rtc_algorithm") != "soft_prefix_guidance"
+        or model.get("rtc_warmed_up") is not True
+        or not isinstance(schedules, (list, tuple))
+        or rtc_schedule not in schedules
+    ):
+        raise ValueError("RTC mode requires a compatible, RTC-warmed 19999 JAX model server")
 
 
 def launch_commands(args, output, ipc):
@@ -190,11 +220,12 @@ def main(argv=None):
                 connect(args.uri, compression=None, max_size=None, open_timeout=5, close_timeout=2, proxy=None)
             )
             model = msgpack_numpy.unpackb(ws.recv(timeout=3))
-            if (
-                any(model.get(key) != value for key, value in runtime["checkpoint"].items())
-                or model.get("warmed_up") is not True
-            ):
-                raise ValueError("Wrong 19999 checkpoint/normalization or model server not warmed up")
+            check_model_metadata(
+                model,
+                runtime["checkpoint"],
+                broker_mode=args.broker_mode,
+                rtc_schedule=args.rtc_prefix_attention_schedule,
+            )
         ipc = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="pi05-fast-")))
         children = hardware.Children(output)
         stack.callback(children.close)

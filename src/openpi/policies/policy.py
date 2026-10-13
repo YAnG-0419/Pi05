@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import logging
 import pathlib
 import time
@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from openpi_client import base_policy as _base_policy
+from openpi_client import rtc as _rtc
 import torch
 from typing_extensions import override
 
@@ -33,6 +34,7 @@ class Policy(BasePolicy):
         metadata: dict[str, Any] | None = None,
         pytorch_device: str = "cpu",
         is_pytorch: bool = False,
+        rtc_action_repack: Callable[[np.ndarray], np.ndarray] | None = None,
     ):
         """Initialize the Policy.
 
@@ -46,6 +48,9 @@ class Policy(BasePolicy):
             pytorch_device: Device to use for PyTorch models (e.g., "cpu", "cuda:0").
                           Only relevant when is_pytorch=True.
             is_pytorch: Whether the model is a PyTorch model. If False, assumes JAX model.
+            rtc_action_repack: Converts deployed absolute actions into the raw
+                action layout consumed by the input transform. Policies without
+                this adapter reject RTC requests.
         """
         self._model = model
         self._input_transform = _transforms.compose(transforms)
@@ -54,6 +59,7 @@ class Policy(BasePolicy):
         self._metadata = metadata or {}
         self._is_pytorch_model = is_pytorch
         self._pytorch_device = pytorch_device
+        self._rtc_action_repack = rtc_action_repack
 
         if self._is_pytorch_model:
             self._model = self._model.to(pytorch_device)
@@ -65,10 +71,46 @@ class Policy(BasePolicy):
             self._rng = rng or jax.random.key(0)
 
     @override
-    def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
+    def infer(
+        self,
+        obs: dict,
+        *,
+        noise: np.ndarray | None = None,
+        rtc_context: _rtc.RTCContext | dict | None = None,
+    ) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
+        context = None
+        if rtc_context is not None:
+            if self._is_pytorch_model:
+                raise ValueError("RTC soft prefix guidance is only implemented for JAX policies")
+            if self._rtc_action_repack is None:
+                raise ValueError("This policy has no RTC action-layout adapter")
+            context = _rtc.validate_context(rtc_context)
+            inputs["actions"] = self._rtc_action_repack(context.previous_actions)
         inputs = self._input_transform(inputs)
+
+        rtc_target = None
+        if context is not None:
+            transformed_prefix = np.asarray(inputs.pop("actions"))
+            expected_dim = self._model.action_dim
+            expected_horizon = self._model.action_horizon
+            if transformed_prefix.ndim != 2 or transformed_prefix.shape != (
+                len(context.previous_actions),
+                expected_dim,
+            ):
+                raise ValueError(
+                    "RTC input transforms must preserve the prefix length and produce "
+                    f"{expected_dim} action dimensions, got {transformed_prefix.shape}"
+                )
+            if not np.isfinite(transformed_prefix).all():
+                raise ValueError("RTC input transforms produced non-finite actions")
+            if expected_horizon != _rtc.ACTION_HORIZON:
+                raise ValueError("RTC protocol and model action horizons do not match")
+            rtc_target = np.zeros((expected_horizon, expected_dim), dtype=transformed_prefix.dtype)
+            prefix_length = min(len(transformed_prefix), expected_horizon)
+            rtc_target[:prefix_length] = transformed_prefix[:prefix_length]
+
         if not self._is_pytorch_model:
             # Make a batch and convert to jax.Array.
             inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
@@ -80,6 +122,17 @@ class Policy(BasePolicy):
 
         # Prepare kwargs for sample_actions
         sample_kwargs = dict(self._sample_kwargs)
+        if context is not None:
+            weights = _rtc.prefix_weights(
+                context.inference_delay_steps,
+                context.prefix_attention_horizon,
+                context.prefix_attention_schedule,
+            )
+            sample_kwargs.update(
+                rtc_actions=jnp.asarray(rtc_target)[None, ...],
+                rtc_weights=jnp.asarray(weights, dtype=jnp.float32)[None, :, None],
+                rtc_max_guidance_weight=jnp.asarray(context.max_guidance_weight, dtype=jnp.float32),
+            )
         if noise is not None:
             noise = torch.from_numpy(noise).to(self._pytorch_device) if self._is_pytorch_model else jnp.asarray(noise)
 
@@ -103,6 +156,8 @@ class Policy(BasePolicy):
         outputs["policy_timing"] = {
             "infer_ms": model_time * 1000,
         }
+        if context is not None:
+            outputs[_rtc.RTC_RECEIPT_KEY] = _rtc.make_receipt(context)
         return outputs
 
     @property

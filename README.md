@@ -1,10 +1,14 @@
 # OpenPI FR3 与 Wuji 部署
 
-更新日期：2026-09-29
+更新日期：2026-10-13
 
 本仓库用于 FR3 双臂与 Wuji 双手的 pi05 番茄采摘任务，包含模型微调、推理服务和机器人执行入口。基于 Physical Intelligence 的 OpenPI 项目，当前操作入口以本页和根目录的使用说明为准。
 
 **完整操作说明：[FR3_Wuji_pi05部署使用说明.docx](FR3_Wuji_pi05部署使用说明.docx)**。文档包括快速指南、各模型启动命令、参数说明、state/action 映射和当前软件阈值。
+
+> 2026-10-13：19999 快速入口已新增显式 RTC 模式；默认仍是 RTG。RTC 的最新接入边界、异机安装和
+> 验证步骤以[快速部署 README](deploy/fr3_wuji_fast/README.md)与[开发日志](docs/开发日志.md)为准。
+> 当前电脑只完成 Python 静态编译和 diff 空白检查，未运行 pytest、GPU/JAX JIT 或真机链路。
 
 ## 快速开始
 
@@ -55,7 +59,7 @@ bash deploy/fr3_wuji_medium/run.sh --model 54 \
   --start-cameras --finish-policy disable
 ```
 
-**快速**：采用 30 Hz 模型时间轴和 RTG 异步衔接。
+**快速**：采用 30 Hz 模型时间轴，默认使用 RTG 异步衔接。
 
 ```bash
 bash deploy/fr3_wuji_fast/run.sh \
@@ -63,6 +67,24 @@ bash deploy/fr3_wuji_fast/run.sh \
   --execute --supervised-trial --broker-mode rtg --rounds 50 \
   --start-cameras --finish-policy disable
 ```
+
+仅19999 / 50×54 / JAX 服务可显式选择 RTC。RTC 在模型端做 soft prefix guidance，执行端按请求到
+实际接纳的延迟跳过过期节点，不再叠加 RTG cubic 拼接：
+
+```bash
+bash deploy/fr3_wuji_fast/run.sh \
+  --checkpoint "$CKPT" --uri ws://127.0.0.1:8001 \
+  --execute --supervised-trial --broker-mode rtc \
+  --rtc-initial-delay-steps 5 \
+  --rtc-delay-buffer-size 10 \
+  --rtc-prefix-attention-schedule exp \
+  --rtc-max-guidance-weight 5 \
+  --rounds 50 --start-cameras --finish-policy disable
+```
+
+迁移到另一台电脑时，除仓库锁定依赖外还要安装
+`deploy/fr3_wuji_fast/requirements.txt`，并确认 workspace 中的 `packages/openpi-client` 已更新且可导入
+`openpi_client.rtc`；可直接使用上述两份 RTC 文档中的完整安装与无硬件验证命令。
 
 三种入口均以 100 Hz 下发设备指令，实际运行耗时还受轨迹约束和推理衔接影响。慢/中速的 `--rounds 50 --replan-steps 20` 表示运行 50 轮，每轮预测 50 步、使用前 20 步；快速入口不使用 `--continuous` 或 `--replan-steps`。
 

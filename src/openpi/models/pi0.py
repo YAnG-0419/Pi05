@@ -1,3 +1,4 @@
+from collections.abc import Callable
 import logging
 
 import einops
@@ -14,6 +15,50 @@ import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
 
 logger = logging.getLogger("openpi")
+
+
+def _rtc_guided_velocity(
+    velocity_fn: Callable[[jax.Array], jax.Array],
+    x_t: jax.Array,
+    time: jax.Array | float,
+    rtc_actions: jax.Array,
+    rtc_weights: jax.Array,
+    rtc_max_guidance_weight: jax.Array | float,
+) -> jax.Array:
+    """Applies real-time chunking guidance to a reverse-time flow velocity.
+
+    This repository samples from noise at ``time=1`` to clean actions at
+    ``time=0``, so the clean-action estimate is ``x_t - time * velocity``.
+    Consequently, the VJP correction is subtracted from the velocity: the
+    sampler's negative Euler step then moves the clean estimate toward the RTC
+    actions.
+    """
+
+    time = jnp.asarray(time, dtype=x_t.dtype)
+
+    def estimate_clean_actions(actions):
+        velocity = velocity_fn(actions)
+        return actions - time * velocity, velocity
+
+    clean_actions, clean_actions_vjp, velocity = jax.vjp(estimate_clean_actions, x_t, has_aux=True)
+    error = jnp.asarray((rtc_actions - clean_actions) * rtc_weights, dtype=clean_actions.dtype)
+    correction = clean_actions_vjp(error)[0]
+
+    # This is Eq. (5) from RTC after substituting the reverse clock
+    # tau = 1 - time. At either endpoint the uncapped value is infinite;
+    # nan_to_num makes the endpoint behavior explicit before applying the cap.
+    remaining_time = 1.0 - time
+    guidance_weight = (jnp.square(time) + jnp.square(remaining_time)) / (time * remaining_time)
+    max_guidance_weight = jnp.asarray(rtc_max_guidance_weight, dtype=x_t.dtype)
+    guidance_weight = jnp.nan_to_num(
+        guidance_weight,
+        nan=max_guidance_weight,
+        posinf=max_guidance_weight,
+        neginf=0.0,
+    )
+    guidance_weight = jnp.minimum(jnp.maximum(guidance_weight, 0.0), max_guidance_weight)
+
+    return velocity - guidance_weight * correction
 
 
 def make_attn_mask(input_mask, mask_ar):
@@ -221,6 +266,9 @@ class Pi0(_model.BaseModel):
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
+        rtc_actions: at.Float[at.Array, "b ah ad"] | None = None,
+        rtc_weights: at.Float[at.Array, "b ah 1"] | None = None,
+        rtc_max_guidance_weight: float | at.Float[at.Array, ""] = 5.0,
     ) -> _model.Actions:
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
@@ -230,14 +278,25 @@ class Pi0(_model.BaseModel):
         if noise is None:
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
+        if (rtc_actions is None) != (rtc_weights is None):
+            raise ValueError("rtc_actions and rtc_weights must either both be provided or both be None")
+        if rtc_actions is not None:
+            expected_actions_shape = (batch_size, self.action_horizon, self.action_dim)
+            expected_weights_shape = (batch_size, self.action_horizon, 1)
+            if rtc_actions.shape != expected_actions_shape:
+                raise ValueError(f"rtc_actions must have shape {expected_actions_shape}, got {rtc_actions.shape}")
+            if rtc_weights.shape != expected_weights_shape:
+                raise ValueError(f"rtc_weights must have shape {expected_weights_shape}, got {rtc_weights.shape}")
+            if jnp.shape(rtc_max_guidance_weight) != ():
+                raise ValueError("rtc_max_guidance_weight must be a scalar")
+
         # first fill KV cache with a forward pass of the prefix
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
 
-        def step(carry):
-            x_t, time = carry
+        def velocity(x_t, time):
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
                 observation, x_t, jnp.broadcast_to(time, batch_size)
             )
@@ -266,7 +325,23 @@ class Pi0(_model.BaseModel):
                 adarms_cond=[None, adarms_cond],
             )
             assert prefix_out is None
-            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            return self.action_out_proj(suffix_out[:, -self.action_horizon :])
+
+        def step(carry):
+            x_t, time = carry
+            if rtc_actions is None:
+                # Keep the original path entirely outside VJP when RTC is not
+                # requested, preserving its numerical behavior and cost.
+                v_t = velocity(x_t, time)
+            else:
+                v_t = _rtc_guided_velocity(
+                    lambda guided_x_t: velocity(guided_x_t, time),
+                    x_t,
+                    time,
+                    rtc_actions,
+                    rtc_weights,
+                    rtc_max_guidance_weight,
+                )
 
             return x_t + dt * v_t, time + dt
 

@@ -4,6 +4,7 @@ from dataclasses import replace
 import queue
 
 import numpy as np
+from openpi_client import rtc
 import pytest
 
 from deploy.fr3_wuji_fast.control import run_control
@@ -100,6 +101,10 @@ def test_defaults_match_19999_hardware_without_changing_slow_defaults():
     assert args.broker_mode == "rtg"
     assert args.guidance_steps == 3
     assert args.trigger_fraction == 0.5
+    assert args.rtc_initial_delay_steps == 5
+    assert args.rtc_delay_buffer_size == 10
+    assert args.rtc_prefix_attention_schedule == "exp"
+    assert args.rtc_max_guidance_weight == 5.0
     assert args.left_arm_ip == before["left_arm_ip"]
     assert args.right_arm_ip == before["right_arm_ip"]
     assert args.wuji_left_address == before["wuji_left_address"]
@@ -115,6 +120,9 @@ def test_defaults_match_19999_hardware_without_changing_slow_defaults():
         ["--rounds", "1001"],
         ["--trigger-fraction", "nan"],
         ["--guidance-steps", "1"],
+        ["--broker-mode", "rtc", "--rtc-initial-delay-steps", "26"],
+        ["--rtc-delay-buffer-size", "0"],
+        ["--rtc-max-guidance-weight", "nan"],
         ["--execute"],
         ["--supervised-trial"],
         ["--left-arm-ip", "wrong"],
@@ -196,6 +204,116 @@ def test_rtg_splice_compensates_latency_and_blends_at_actual_offset():
     np.testing.assert_allclose(t.actions[2:], new.actions[7:])
     assert len(t.actions) == 45
     assert not t.request_due(11.5)
+
+
+def test_rtc_splice_binds_prefix_skips_actual_latency_and_avoids_cubic_blend():
+    timeline = Timeline(chunk(), rounds=2, mode="rtc")
+    timeline.start(10.0)
+    request = timeline.request(10 + 25 / 30)
+    previous = np.asarray(request["rtc_previous_actions"])
+    assert previous.shape == (25, 54)
+    context = rtc.validate_context(
+        {
+            "protocol_version": 1,
+            "token": request["rtc_token"],
+            "source_number": request["rtc_source_number"],
+            "source_sha256": request["rtc_source_sha256"],
+            "previous_actions": previous,
+            "inference_delay_steps": 5,
+            "prefix_attention_horizon": len(previous),
+            "prefix_attention_schedule": "exp",
+            "max_guidance_weight": 5.0,
+        }
+    )
+    raw = np.full((50, 54), 0.02)
+    new = checked_chunk(
+        raw,
+        Admission(10.82, 10.84, 10.98, "request-2", "weights", 0),
+        2,
+        LIMITS,
+        rtc_context=context,
+        rtc_receipt=rtc.make_receipt(context),
+    )
+
+    event = timeline.install(new, 11.0, LIMITS)
+
+    assert event["latency_offset_steps"] == 5
+    assert event["rtc"]["predicted_delay_steps"] == 5
+    assert event["rtc"]["actual_delay_steps"] == 5
+    np.testing.assert_array_equal(timeline.actions, raw[5:])
+    assert timeline.pending_rtc is None
+
+
+def test_rtc_receipt_mismatch_cannot_replace_the_active_plan():
+    timeline = Timeline(chunk(), rounds=2, mode="rtc")
+    timeline.start(10.0)
+    request = timeline.request(10 + 25 / 30)
+    previous = np.asarray(request["rtc_previous_actions"])
+    context = rtc.validate_context(
+        {
+            "protocol_version": 1,
+            "token": request["rtc_token"],
+            "source_number": request["rtc_source_number"],
+            "source_sha256": request["rtc_source_sha256"],
+            "previous_actions": previous,
+            "inference_delay_steps": 5,
+            "prefix_attention_horizon": len(previous),
+            "prefix_attention_schedule": "exp",
+            "max_guidance_weight": 5.0,
+        }
+    )
+    new = checked_chunk(
+        np.full((50, 54), 0.02),
+        Admission(10.82, 10.84, 10.98, "request-2", "weights", 0),
+        2,
+        LIMITS,
+        rtc_context=context,
+        rtc_receipt=rtc.make_receipt(context),
+    )
+    new.rtc_receipt["token"] = "wrong-token"
+    old_actions = timeline.actions.copy()
+
+    with pytest.raises(rtc.RTCProtocolError, match="does not match"):
+        timeline.install(new, 11.0, LIMITS)
+
+    assert timeline.number == 1
+    assert timeline.pending_rtc is not None
+    np.testing.assert_array_equal(timeline.actions, old_actions)
+
+
+def test_rtc_actual_delay_cannot_outlive_conditioned_prefix():
+    timeline = Timeline(chunk(), rounds=2, mode="rtc")
+    timeline.start(10.0)
+    request = timeline.request(10 + 25 / 30)
+    context = rtc.validate_context(
+        {
+            "protocol_version": 1,
+            "token": request["rtc_token"],
+            "source_number": request["rtc_source_number"],
+            "source_sha256": request["rtc_source_sha256"],
+            "previous_actions": request["rtc_previous_actions"],
+            "inference_delay_steps": 5,
+            "prefix_attention_horizon": 5,
+            "prefix_attention_schedule": "exp",
+            "max_guidance_weight": 5.0,
+        }
+    )
+    new = checked_chunk(
+        np.full((50, 54), 0.02),
+        Admission(10.82, 10.84, 11.03, "request-2", "weights", 0),
+        2,
+        LIMITS,
+        rtc_context=context,
+        rtc_receipt=rtc.make_receipt(context),
+    )
+    old_actions = timeline.actions.copy()
+
+    with pytest.raises(ValueError, match="exceeded the conditioned prefix"):
+        timeline.install(new, 11.04, LIMITS)
+
+    assert timeline.number == 1
+    assert timeline.pending_rtc is not None
+    np.testing.assert_array_equal(timeline.actions, old_actions)
 
 
 @pytest.mark.parametrize("case", ["late", "foreign", "duplicate", "old_request", "bad_splice"])

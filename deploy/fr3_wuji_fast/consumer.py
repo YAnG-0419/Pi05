@@ -1,8 +1,10 @@
 # ruff: noqa: RUF001 -- Chinese operator messages use native punctuation.
 """Observation callback and WebSocket inference in the non-control process."""
 
+from collections import deque
 from dataclasses import asdict
 import json
+import math
 import multiprocessing as mp
 from pathlib import Path
 import queue
@@ -11,12 +13,14 @@ import time
 import uuid
 
 import numpy as np
+from openpi_client import rtc
 
 from deploy.fr3_wuji_slow.continuous import StopFlag
 from deploy.fr3_wuji_slow.core import Admission
 
 from .control import worker
 from .timeline import checked_chunk
+from .timeline import future_nodes
 from .timeline import prepare_initial
 
 
@@ -34,6 +38,10 @@ class FastConsumer:
         self.closed = False
         self.completed = 0
         self.request = {"number": 1}
+        self.rtc_delay_steps = deque(
+            [options.get("rtc_initial_delay_steps", 5)],
+            maxlen=options.get("rtc_delay_buffer_size", 10),
+        )
         self.report = {
             "state": "waiting_for_observation",
             "source_hz": 30,
@@ -66,6 +74,8 @@ class FastConsumer:
                 print("【阶段】" + event["text"], flush=True)
             elif kind == "chunk_started":
                 self.report["chunks"].append({k: v for k, v in event.items() if k != "executed_nodes"})
+                if "rtc" in event:
+                    self.rtc_delay_steps.append(event["rtc"]["actual_delay_steps"])
                 limited = event.get("arm_rate_limited_values", 0)
                 print(
                     f"【阶段】动作块 {event['number']}/{self.options['rounds']}："
@@ -104,12 +114,56 @@ class FastConsumer:
         self.poll()
         if self.completed or self.request is None:
             return
-        packet = self.codec.packb(obs)
-        sent, wall = time.monotonic(), time.time()
-        ages = [wall - sample["stamp"] for sample in metadata["samples"].values()]
-        if not ages or any(not 0 <= age <= 0.07 for age in ages):
-            return
-        number = self.request["number"]
+        request = self.request
+        number = request["number"]
+        rtc_context = None
+        rtc_followup = self.options.get("mode", "rtg") == "rtc" and number > 1
+        if rtc_followup:
+            wall = time.time()
+            ages = [wall - sample["stamp"] for sample in metadata["samples"].values()]
+            if not ages or any(not 0 <= age <= 0.07 for age in ages):
+                return
+            sent = time.monotonic()
+            reference = np.asarray(request["rtc_previous_actions"], dtype=np.float64)
+            elapsed = sent - request["rtc_reference_time"]
+            if elapsed < 0:
+                raise ValueError("RTC request clock moved backwards")
+            previous_actions = future_nodes(reference, elapsed)
+            if not len(previous_actions):
+                raise ValueError("RTC reference plan expired before observation dispatch")
+            delay_steps = max(self.rtc_delay_steps)
+            if delay_steps > len(previous_actions):
+                raise ValueError("Predicted RTC delay exceeds the remaining reference plan")
+            rtc_context = rtc.validate_context(
+                {
+                    "protocol_version": rtc.PROTOCOL_VERSION,
+                    "token": request["rtc_token"],
+                    "source_number": request["rtc_source_number"],
+                    "source_sha256": request["rtc_source_sha256"],
+                    "previous_actions": previous_actions,
+                    "inference_delay_steps": delay_steps,
+                    "prefix_attention_horizon": len(previous_actions),
+                    "prefix_attention_schedule": self.options.get("rtc_prefix_attention_schedule", "exp"),
+                    "max_guidance_weight": self.options.get("rtc_max_guidance_weight", 5.0),
+                }
+            )
+            packet = self.codec.packb(rtc.make_request(obs, rtc_context))
+            preparation_elapsed = time.monotonic() - sent
+            if preparation_elapsed < 0:
+                raise ValueError("RTC request clock moved backwards during packet preparation")
+            if any(age + preparation_elapsed > 0.07 for age in ages):
+                # Packing camera frames and the RTC envelope is part of the
+                # observation-to-send budget. Keep the request pending so the
+                # next fresh observation can retry without stale transmission.
+                return
+        else:
+            # Preserve the legacy RTG/serial timing origin: serialization
+            # happens before the observation age and sent_time are recorded.
+            packet = self.codec.packb(obs)
+            sent, wall = time.monotonic(), time.time()
+            ages = [wall - sample["stamp"] for sample in metadata["samples"].values()]
+            if not ages or any(not 0 <= age <= 0.07 for age in ages):
+                return
         self.request = None
         print(f"【推理】第 {number} 次，使用新观测", flush=True)
         self.ws.send(packet)
@@ -119,20 +173,63 @@ class FastConsumer:
             raise ValueError("Host clock changed during inference")
         if isinstance(response, str):
             raise RuntimeError("Policy server returned an error: " + response)
+        actual_delay_steps = math.ceil(max(0.0, received - sent) * 30 - 1e-10)
+        # Seed RTC with the first vanilla inference RTT. Once RTC is active,
+        # chunk_started supplies the more conservative request-to-install
+        # offset exactly once per admitted chunk.
+        if self.options.get("mode", "rtg") == "rtc" and rtc_context is None:
+            self.rtc_delay_steps.append(actual_delay_steps)
         admission = Admission(
             sent - max(ages), sent, received, uuid.uuid4().hex, self.model["checkpoint_manifest_sha256"], 0
         )
         admission.check()
-        raw = np.asarray(self.codec.unpackb(response)["actions"])
+        response_data = self.codec.unpackb(response)
+        raw = np.asarray(response_data["actions"])
+        # Always surface a server receipt to checked_chunk.  A receipt on a
+        # request without RTC context is a protocol mismatch and must fail
+        # closed instead of being silently discarded.
+        rtc_receipt = response_data.get(rtc.RTC_RECEIPT_KEY)
         # Persist every original prediction, including rejected ones.
         directory = self.output / f"chunk-{number:04d}"
         directory.mkdir()
-        np.savez_compressed(directory / "inference.npz", actions=raw, state=obs["observation/state"])
+        arrays = {"actions": raw, "state": obs["observation/state"]}
+        if rtc_context is not None:
+            arrays["rtc_previous_actions"] = rtc_context.previous_actions
+        np.savez_compressed(directory / "inference.npz", **arrays)
+        rtc_record = None
+        if rtc_context is not None:
+            rtc_record = {
+                "protocol_version": rtc_context.protocol_version,
+                "token": rtc_context.token,
+                "source_number": rtc_context.source_number,
+                "source_sha256": rtc_context.source_sha256,
+                "inference_delay_steps": rtc_context.inference_delay_steps,
+                "actual_websocket_delay_steps": actual_delay_steps,
+                "prefix_attention_horizon": rtc_context.prefix_attention_horizon,
+                "prefix_attention_schedule": rtc_context.prefix_attention_schedule,
+                "max_guidance_weight": rtc_context.max_guidance_weight,
+                "receipt": rtc_receipt,
+            }
         (directory / "admission.json").write_text(
-            json.dumps({**asdict(admission), "prompt": obs.get("prompt"), "observation_metadata": metadata}, indent=2)
+            json.dumps(
+                {
+                    **asdict(admission),
+                    "prompt": obs.get("prompt"),
+                    "observation_metadata": metadata,
+                    "rtc": rtc_record,
+                },
+                indent=2,
+            )
             + "\n"
         )
-        chunk = checked_chunk(raw, admission, number, self.limits)
+        chunk = checked_chunk(
+            raw,
+            admission,
+            number,
+            self.limits,
+            rtc_context=rtc_context,
+            rtc_receipt=rtc_receipt,
+        )
         if chunk.projected_hand_values:
             print(f"【手部预测】{chunk.projected_hand_values} 个角度投影到现有限位；原始预测已保存", flush=True)
         self.poll()

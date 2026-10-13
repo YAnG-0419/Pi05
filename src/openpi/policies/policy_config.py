@@ -1,3 +1,4 @@
+from collections.abc import Callable
 import logging
 import os
 import pathlib
@@ -22,6 +23,7 @@ def create_trained_policy(
     default_prompt: str | None = None,
     norm_stats: dict[str, transforms.NormStats] | None = None,
     pytorch_device: str | None = None,
+    rtc_action_repack: Callable[[Any], Any] | None = None,
 ) -> _policy.Policy:
     """Create a policy from a trained checkpoint.
 
@@ -37,6 +39,9 @@ def create_trained_policy(
             from the checkpoint directory.
         pytorch_device: Device to use for PyTorch models (e.g., "cpu", "cuda", "cuda:0").
                       If None and is_pytorch=True, will use "cuda" if available, otherwise "cpu".
+        rtc_action_repack: Optional conversion from deployed absolute-action order
+            to the raw action order expected by the input transforms. Required
+            before this policy can accept an RTC request.
 
     Note:
         The function automatically detects whether the model is PyTorch-based by checking for the
@@ -91,4 +96,5 @@ def create_trained_policy(
         metadata=train_config.policy_metadata,
         is_pytorch=is_pytorch,
         pytorch_device=pytorch_device if is_pytorch else None,
+        rtc_action_repack=rtc_action_repack,
     )

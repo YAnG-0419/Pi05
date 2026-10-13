@@ -7,7 +7,7 @@
 | `fr3_wuji_runtime/` | 三种速度共用的控制器 overlay 核验、工作站清单、Docker 启动命令、设备占用检查、子进程清理、设备桥、ROS 网关和有期限的 Unix socket IPC。|
 | `fr3_wuji_slow/` | 慢速规划、播放器、连续执行、现场入口及慢速边界。旧名 `oneshot` 只保留兼容入口和暂未迁出的设备/观测模块。|
 | `fr3_wuji_medium/` | 中速规划与连续执行；`runtime/` 保存中速特有的速度检查、设备桥和 ROS 网关。|
-| `fr3_wuji_fast/` | 30 Hz 节点播放、RTG/serial 调度和 Ruckig 臂部平滑。|
+| `fr3_wuji_fast/` | 30 Hz 节点播放、RTG/RTC/serial 调度和 Ruckig 臂部平滑。|
 | `fr3_wuji_models/model_*/` | 权重服务、输入输出适配和 checkpoint 契约；与速度方案分开。`registry.py` 集中模型默认端口、路径和采样频率。|
 
 `deploy/fr3_wuji_30000*`、`deploy/fr3_wuji_25000*` 中的 `serve.py`/`contract.py` 与 `experiments/weight_motion_eval/oneshot` 中已迁移的模块仍是兼容导入。旧目录的执行包装与 shell 脚本保留。不要在兼容文件里新增实现；按上表修改新目录。旧名还出现在锁文件、overlay、ROS 节点名称和历史日志里，改这些名字会影响现有部署，故暂时保留。
@@ -18,7 +18,7 @@
 | --- | --- | --- | --- |
 | 慢 | `bash deploy/fr3_wuji_slow/run.sh --check` | 19999，`:8001` | `--minimum-time-scale 2.5`、`--continuous`、`--rounds 50`、`--replan-steps 20`、结束 `hold` |
 | 中 | `bash deploy/fr3_wuji_medium/run.sh --check` | `64-lora-30hz`（原 30000），`:8002` | `--model`、`--minimum-time-scale 0.625`、`--slow-after-seconds 25`、结束 `hold` |
-| 快 | `bash deploy/fr3_wuji_fast/run.sh --check` | 19999，`:8001` | `--broker-mode rtg/serial`、`--trigger-fraction 0.5`、`--guidance-steps 3`、`--rounds 50`、结束 `disable` |
+| 快 | `bash deploy/fr3_wuji_fast/run.sh --check` | 19999，`:8001` | `--broker-mode rtg/rtc/serial`（默认rtg）、`--trigger-fraction 0.5`、`--guidance-steps 3`、`--rounds 50`、结束 `disable` |
 
 三个入口都可设 `--left-arm-ip`、`--right-arm-ip`、`--wuji-left-address`、`--wuji-right-address`、`--checkpoint`、`--uri`、`--output`、`--start-cameras`、`--finish-policy`。默认设备地址分别是 `172.16.0.2`、`172.16.1.2`、`192.168.1.110:7447`、`192.168.2.111:7447`。`--check` 仅生成配置；`--read-only` 读取设备反馈；真机下发必须显式 `--execute` 并使用 `--qualification` 或 `--supervised-trial`。慢、中另有 `--hand-control slider/strict`；快固定 slider。三种方案共用 `.deployment/oneshot-owner.lock`，不能同时占用真机。
 
@@ -36,6 +36,14 @@
 旧参数仍兼容；`64` 仅作为 `64-lora-30hz` 的别名。另支持 `--model 20hz`（20 Hz、默认端口 8006）。
 慢速原入口和快速主入口仍使用原生 54 维适配。
 其他权重与速度的组合以各模型包装脚本和契约为准。
+
+快速入口的 RTC 必须显式指定 `--broker-mode rtc`，目前仅支持19999、50×54动作和JAX推理。
+默认 RTC 参数为 `--rtc-initial-delay-steps 5`、`--rtc-delay-buffer-size 10`、
+`--rtc-prefix-attention-schedule exp`、`--rtc-max-guidance-weight 5`。模型端对旧动作前缀做
+soft prefix guidance，执行端按实际延迟跳过过期节点；RTC 路径不再叠加 RTG 的 cubic 拼接，
+但仍经过快速入口的速度投影、Ruckig 和设备安全检查。服务响应回执位于顶层 `rtc` 字段；运行期的
+过期前缀、回执不匹配或实测延迟超过已引导 horizon 会终止整次执行并走设备停止路径，而非只跳过
+本次换块。64维快速入口只复用执行层，不因此获得 RTC 支持。
 
 ## 轨迹与边界参数
 

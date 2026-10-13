@@ -6,6 +6,7 @@ import traceback
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
+from openpi_client import rtc
 import websockets.asyncio.server as _server
 import websockets.frames
 
@@ -55,10 +56,15 @@ class WebsocketPolicyServer:
         while True:
             try:
                 start_time = time.monotonic()
-                obs = msgpack_numpy.unpackb(await websocket.recv())
+                payload = msgpack_numpy.unpackb(await websocket.recv())
+                obs, rtc_context = rtc.unwrap_request(payload)
 
                 infer_time = time.monotonic()
-                action = self._policy.infer(obs)
+                action = (
+                    self._policy.infer(obs, rtc_context=rtc_context)
+                    if rtc_context is not None
+                    else self._policy.infer(obs)
+                )
                 infer_time = time.monotonic() - infer_time
 
                 action["server_timing"] = {

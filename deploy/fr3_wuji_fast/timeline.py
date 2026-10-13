@@ -3,6 +3,8 @@
 RTG follows Wuji's half-chunk asynchronous inference and latency compensation.
 Unlike upstream's cubic broker, smoothing starts at the *actual splice offset*,
 anchored to the current command, so latency cannot skip the smoothed prefix.
+RTC keeps the same asynchronous timing but delegates continuity to model-side
+soft prefix guidance and therefore does not apply the cubic splice again.
 """
 
 from dataclasses import dataclass
@@ -10,8 +12,10 @@ from dataclasses import replace
 import hashlib
 import json
 import math
+import uuid
 
 import numpy as np
+from openpi_client import rtc
 
 from deploy.fr3_wuji_slow.core import ARM
 from deploy.fr3_wuji_slow.core import HAND
@@ -37,9 +41,11 @@ class Chunk:
     sha256: str
     projected_hand_values: int
     arm_rate_limited_values: int = 0
+    rtc_context: rtc.RTCContext | None = None
+    rtc_receipt: dict | None = None
 
 
-def checked_chunk(raw, admission, number, limits):
+def checked_chunk(raw, admission, number, limits, *, rtc_context=None, rtc_receipt=None):
     admission.check()
     if type(number) is not int or number < 1:
         raise ValueError("Invalid inference number")
@@ -58,7 +64,13 @@ def checked_chunk(raw, admission, number, limits):
     actions[:, HAND] = np.clip(actions[:, HAND], lower[HAND], upper[HAND])
     projected = int(np.count_nonzero(actions != raw))
     digest = hashlib.sha256(raw.astype("<f8").tobytes()).hexdigest()
-    return Chunk(number, admission, raw, actions, digest, projected)
+    context = None
+    if rtc_context is not None:
+        context = rtc.validate_context(rtc_context)
+        rtc.validate_receipt(rtc_receipt, context)
+    elif rtc_receipt is not None:
+        raise ValueError("Unexpected RTC receipt without an RTC request")
+    return Chunk(number, admission, raw, actions, digest, projected, rtc_context=context, rtc_receipt=rtc_receipt)
 
 
 def check_arm_speed(actions):
@@ -118,6 +130,23 @@ def sample_nodes(actions, elapsed):
     return actions[index] + fraction * delta, delta * SOURCE_HZ
 
 
+def future_nodes(actions, elapsed=0.0):
+    """Sample the finite remainder of a 30 Hz plan from an arbitrary time."""
+    actions = np.asarray(actions)
+    if actions.ndim != 2 or actions.shape[1] != 54 or not np.isfinite(actions).all():
+        raise ValueError("RTC reference plan must contain finite 54-dimensional actions")
+    if not math.isfinite(elapsed) or elapsed < 0:
+        raise ValueError("Invalid RTC reference time")
+    count = max(0, math.ceil(len(actions) - elapsed * SOURCE_HZ - 1e-10))
+    if count == 0:
+        return np.empty((0, 54), dtype=actions.dtype)
+    return np.stack([sample_nodes(actions, elapsed + step / SOURCE_HZ)[0] for step in range(count)])
+
+
+def _plan_sha256(actions):
+    return hashlib.sha256(np.asarray(actions, dtype="<f8").tobytes()).hexdigest()
+
+
 @dataclass
 class Initial:
     chunk: Chunk
@@ -162,21 +191,55 @@ def prepare_initial(chunk, start, limits, config_path, now):
 class Timeline:
     """One bounded stream with monotonic chunk numbers and one pending request."""
 
-    def __init__(self, first, *, rounds, mode="rtg", guidance_steps=3, trigger_fraction=0.5):
-        if type(rounds) is not int or not 1 <= rounds <= 1000 or mode not in {"rtg", "serial"}:
+    def __init__(
+        self,
+        first,
+        *,
+        rounds,
+        mode="rtg",
+        guidance_steps=3,
+        trigger_fraction=0.5,
+        rtc_initial_delay_steps=5,
+        rtc_delay_buffer_size=10,
+        rtc_prefix_attention_schedule="exp",
+        rtc_max_guidance_weight=5.0,
+    ):
+        if type(rounds) is not int or not 1 <= rounds <= 1000 or mode not in {"rtg", "rtc", "serial"}:
             raise ValueError("Invalid stream mode/round count")
         if type(guidance_steps) is not int or not 2 <= guidance_steps <= 10:
             raise ValueError("Guidance steps must be 2..10")
         if not math.isfinite(trigger_fraction) or not 0.1 <= trigger_fraction <= 0.9:
             raise ValueError("Trigger fraction must be 0.1..0.9")
+        trigger_step = max(1, int(HORIZON * trigger_fraction))
+        if (
+            type(rtc_initial_delay_steps) is not int
+            or not 0 <= rtc_initial_delay_steps <= HORIZON - trigger_step
+        ):
+            raise ValueError("RTC initial delay must fit inside the prefix attention horizon")
+        if type(rtc_delay_buffer_size) is not int or not 1 <= rtc_delay_buffer_size <= 100:
+            raise ValueError("RTC delay buffer size must be 1..100")
+        if rtc_prefix_attention_schedule not in {"ones", "zeros", "linear", "exp"}:
+            raise ValueError("Unsupported RTC prefix attention schedule")
+        if (
+            isinstance(rtc_max_guidance_weight, bool)
+            or not math.isfinite(rtc_max_guidance_weight)
+            or not 0 < rtc_max_guidance_weight <= 100
+        ):
+            raise ValueError("RTC maximum guidance weight must be finite and in (0, 100]")
         self.first, self.rounds, self.mode = first, rounds, mode
         self.guidance_steps = guidance_steps
-        self.trigger_step = max(1, int(HORIZON * trigger_fraction))
+        self.trigger_step = trigger_step
+        self.rtc_initial_delay_steps = rtc_initial_delay_steps
+        self.rtc_delay_buffer_size = rtc_delay_buffer_size
+        self.rtc_prefix_attention_schedule = rtc_prefix_attention_schedule
+        self.rtc_max_guidance_weight = float(rtc_max_guidance_weight)
         self.actions = first.actions.copy()
         self.number, self.offset = 1, 0
         self.started = None
         self.pending_since = None
+        self.pending_rtc = None
         self.last_request_id = first.admission.request_id
+        self.current_source_sha256 = _plan_sha256(self.actions)
 
     def start(self, now):
         if self.started is not None:
@@ -195,13 +258,34 @@ class Timeline:
         if self.pending_since is not None or self.number >= self.rounds:
             return False
         step = self.offset + int((now - self.started) * SOURCE_HZ + 1e-10)
-        return step >= self.trigger_step if self.mode == "rtg" else self.exhausted(now)
+        return step >= self.trigger_step if self.mode in {"rtg", "rtc"} else self.exhausted(now)
 
     def request(self, now):
         if not self.request_due(now):
             raise ValueError("Unexpected inference trigger")
+        event = {"event": "infer", "number": self.number + 1, "triggered_at": now}
+        pending_rtc = None
+        if self.mode == "rtc":
+            previous = future_nodes(self.actions, now - self.started)
+            maximum_horizon = HORIZON - self.trigger_step
+            previous = previous[:maximum_horizon]
+            if len(previous) < self.rtc_initial_delay_steps:
+                raise ValueError("RTC reference plan is shorter than the configured initial delay")
+            pending_rtc = {
+                "token": uuid.uuid4().hex,
+                "source_number": self.number,
+                "source_sha256": self.current_source_sha256,
+            }
+            event.update(
+                rtc_token=pending_rtc["token"],
+                rtc_source_number=pending_rtc["source_number"],
+                rtc_source_sha256=pending_rtc["source_sha256"],
+                rtc_reference_time=now,
+                rtc_previous_actions=previous.tolist(),
+            )
         self.pending_since = now
-        return {"event": "infer", "number": self.number + 1, "triggered_at": now}
+        self.pending_rtc = pending_rtc
+        return event
 
     def install(self, chunk, now, limits):
         if self.pending_since is None or chunk.number != self.number + 1:
@@ -216,20 +300,46 @@ class Timeline:
             or not a.received_time <= now <= a.observation_time + 1.0
         ):
             raise ValueError("Foreign, stale or superseded prediction at splice")
-        offset = math.ceil(max(0.0, now - a.sent_time) * SOURCE_HZ - 1e-10) if self.mode == "rtg" else 0
+        offset = (
+            math.ceil(max(0.0, now - a.sent_time) * SOURCE_HZ - 1e-10)
+            if self.mode in {"rtg", "rtc"}
+            else 0
+        )
         if offset > HORIZON - self.guidance_steps:
             raise ValueError("Inference left too few future actions")
-        anchor, _ = self.sample(now)
-        actions = smooth_prefix(chunk.actions[offset:], anchor, self.guidance_steps)
+        context = None
+        if self.mode == "rtc":
+            if self.pending_rtc is None or chunk.rtc_context is None:
+                raise ValueError("RTC prediction is missing its request binding")
+            context = chunk.rtc_context
+            rtc.validate_receipt(chunk.rtc_receipt, context)
+            if (
+                context.token != self.pending_rtc["token"]
+                or context.source_number != self.pending_rtc["source_number"]
+                or context.source_sha256 != self.pending_rtc["source_sha256"]
+                or context.source_number != self.number
+                or context.source_sha256 != self.current_source_sha256
+            ):
+                raise ValueError("Foreign, stale or superseded RTC prefix")
+            if offset > context.prefix_attention_horizon:
+                raise ValueError("Actual RTC delay exceeded the conditioned prefix horizon")
+            # Model-side guidance owns continuity in RTC mode. Keep actual
+            # latency skipping and downstream safety projections, but do not
+            # apply the RTG cubic splice a second time.
+            actions = chunk.actions[offset:].copy()
+        else:
+            anchor, _ = self.sample(now)
+            actions = smooth_prefix(chunk.actions[offset:], anchor, self.guidance_steps)
         if np.any(actions < limits["lower"]) or np.any(actions > limits["upper"]):
-            raise ValueError("RTG splice exceeds joint limits")
+            raise ValueError(f"{self.mode.upper()} splice exceeds joint limits")
         actions, rate_limited = limit_arm_speed(actions)
         check_arm_speed(actions)
         # All checks precede replacement; failed predictions cannot leak a frame.
         self.actions, self.offset, self.number = actions, offset, chunk.number
-        self.started, self.pending_since = now, None
+        self.started, self.pending_since, self.pending_rtc = now, None, None
         self.last_request_id = a.request_id
-        return {
+        self.current_source_sha256 = _plan_sha256(actions)
+        event = {
             "event": "chunk_started",
             "number": chunk.number,
             "at": now,
@@ -239,6 +349,18 @@ class Timeline:
             "arm_rate_limited_values": chunk.arm_rate_limited_values + rate_limited,
             "executed_nodes": actions.tolist(),
         }
+        if context is not None:
+            event["rtc"] = {
+                "token": context.token,
+                "source_number": context.source_number,
+                "source_sha256": context.source_sha256,
+                "predicted_delay_steps": context.inference_delay_steps,
+                "actual_delay_steps": offset,
+                "prefix_attention_horizon": context.prefix_attention_horizon,
+                "prefix_attention_schedule": context.prefix_attention_schedule,
+                "max_guidance_weight": context.max_guidance_weight,
+            }
+        return event
 
     def check_pending(self, now):
         if self.pending_since is not None and now - self.pending_since > 1.5:

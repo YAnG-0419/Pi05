@@ -54,6 +54,24 @@ def _reorder_actions(actions) -> np.ndarray:
     )
 
 
+def rtc_actions_to_dataset_order(actions) -> np.ndarray:
+    """Convert deployed absolute actions back to the raw dataset order.
+
+    RTC conditions the next inference on the already accepted hardware plan,
+    whose order is ``[left arm, left hand, right arm, right hand]``.  The FR3
+    input transform still expects the historical dataset order before it
+    applies arm deltas and checkpoint-owned normalization, so the prefix must
+    be inverted here rather than fed to ``_reorder_actions`` directly.
+    """
+    actions = np.asarray(actions)
+    if actions.shape[-1] != FR3_WUJI_ACTION_DIM:
+        raise ValueError(f"Expected FR3/Wuji RTC action dimension 54, got {actions.shape[-1]}")
+    return np.concatenate(
+        [actions[..., 0:7], actions[..., 27:34], actions[..., 7:27], actions[..., 34:54]],
+        axis=-1,
+    )
+
+
 @dataclasses.dataclass(frozen=True)
 class Fr3WujiInputs(transforms.DataTransformFn):
     """Converts raw FR3/Wuji observations and actions to model inputs."""

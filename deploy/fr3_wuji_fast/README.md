@@ -1,9 +1,13 @@
-# 19999 正常速度部署
+# 19999 正常速度部署（RTG / RTC）
 
 独立入口，基于 Wuji 官方 RTG 的动作块管理方式适配本机 FR3 双臂 + Wuji 双手。
 模型动作按 **30 Hz 原时间轴**播放，独立进程插值为 **100 Hz 设备下发**；不使用慢速播放器的
 2.5 倍倍率、整段五次样条慢放、逐块停稳后再推理。首次接管仍受控接近模型首帧并确认到位。
 详见 [上游来源及适配差异](UPSTREAM.md)。这不是未经修改的 Wuji 官方发行版。
+
+本入口新增显式 `--broker-mode rtc`：模型端用 soft prefix guidance 让新动作块对齐尚未执行的
+旧动作前缀，客户端再按本次推理的**实际单调时钟延迟**跳过已经过期的节点。RTC 是推理时引导，
+不训练或替换 checkpoint，也不等同于执行端 Ruckig。RTC 接入时不再叠加 RTG 的 cubic 前缀拼接。
 
 模型服务、观测采集、FR3 网关/控制器、Wuji SDK 设备拥有者均导入或调用原有
 19999 部署代码。共用接口新增会话级机械臂速度参数：快速入口显式传入 **1 rad/s**，
@@ -23,12 +27,16 @@
 | 排列 | 左臂7、左手20、右臂7、右手20 |
 | 图像 | cam0头部、cam1左腕、cam2右腕，沿用本机相机配置 |
 | 下发 | 双臂 `ArmCommand` → 原网关；双手原 SDK `JointCommand` |
-| 默认模式 | RTG、50次预测、执行结束后 disable |
+| 默认模式 | RTG、50次预测、执行结束后 disable（RTC 必须显式选择） |
+| RTC 默认值 | 初始延迟5步、延迟历史容量10、`exp` schedule、最大引导权重5 |
+| RTC 支持范围 | 仅19999、`50×54`、JAX 推理路径 |
 
 `serve.sh` 复用原 `oneshot.policy_server`，加载 checkpoint 自带归一化并预热。
 已有同一 checkpoint 的兼容服务在8001运行时可复用，客户端会核对模型、权重清单和归一化哈希。
 若用另一份19999目录，服务和执行命令都要显式传同一个 `--checkpoint`。
-30000的64维权重应使用其专用适配，本入口不支持混接。
+30000的64维权重应使用其专用适配，本入口不支持混接。RTC 模式还会在启动设备前核对服务端
+协议版本、`soft_prefix_guidance` 能力、schedule 清单和 guided JIT 预热状态；旧服务、PyTorch
+路径及64维模型都不会被当作 RTC 服务使用。
 
 ## 检查与启动
 
@@ -63,14 +71,43 @@ bash deploy/fr3_wuji_fast/run.sh \
   --broker-mode rtg --rounds 50 --finish-policy disable
 ```
 
+连续 RTC 部署（仅19999 / 54D / JAX）：
+
+```bash
+bash deploy/fr3_wuji_fast/run.sh \
+  --execute --supervised-trial --start-cameras \
+  --broker-mode rtc \
+  --rtc-initial-delay-steps 5 \
+  --rtc-delay-buffer-size 10 \
+  --rtc-prefix-attention-schedule exp \
+  --rtc-max-guidance-weight 5 \
+  --rounds 50 --finish-policy disable
+```
+
 已有相机发布时省略 `--start-cameras`。`--finish-policy hold` 会保持末姿态直到 Ctrl-C；
 默认 `disable` 在最后实测到位后释放手部。异常停止仍使用原设备停止逻辑，不自动重连或续播。
 `--read-only` 只读取设备反馈，需要已有双臂状态发布者。
 
 `--broker-mode serial` 按50步播放完后才请求下一次推理，等待时持续发送末姿态；每段内部仍是30Hz。
 RTG 默认 `--trigger-fraction 0.5 --guidance-steps 3`，动作块中途异步推理，并在新结果到达时
-跳过推理期间已过去的节点、平滑接入剩余节点。`--rounds` 是接纳的预测次数，不保证每次都播完50步。
+跳过推理期间已过去的节点，再用 cubic 前缀平滑接入剩余节点。RTC 也在块中途请求，但会把
+请求发出时仍有效的旧动作作为 soft prefix 交给模型；控制进程接纳结果时用请求发出至接纳的实际
+端到端延迟向上取整计算跳步，直接安装模型已经引导过的剩余动作，**不会再运行 cubic 拼接**。
+两种连续模式都保留
+后续机械臂速度投影、Ruckig 和设备安全检查。`--rounds` 是接纳的预测次数，不保证每次都播完50步。
 单块包含50个节点，首末节点相距49/30秒，最后节点保留一个周期，完整块占50/30秒。
+
+RTC 延迟历史以 `--rtc-initial-delay-steps 5` 为种子，首块普通推理的实测延迟也会先写入历史；
+第一次 RTC 请求即从容量为 `--rtc-delay-buffer-size 10` 的当前历史中取保守最大值作为模型条件。
+之后每个已接纳 RTC 块只记录一次请求发出至控制进程安装的端到端 offset；同一 RTC 轮次不会再让
+WebSocket RTT 与安装 offset 分别占用两个槽位。历史在首轮仍包含 vanilla RTT，随后逐步由已接纳
+RTC 块的端到端 offset 滚动替换，容量10最多保留10条样本。预测值与接纳时按本次实测延迟计算的
+跳步是两个值。`--rtc-prefix-attention-schedule exp` 和
+`--rtc-max-guidance-weight 5` 控制模型端前缀权重。线上协议字段分别为
+`inference_delay_steps`、`prefix_attention_horizon`、`prefix_attention_schedule`、
+`max_guidance_weight`；服务响应把回执放在顶层 `rtc` 字段。请求和回执还绑定源动作块编号、哈希和
+token。过期前缀、回执不匹配或实测延迟超过已引导 horizon 都会中止整次执行并走既有设备停止路径，
+不是只拒绝这次切换后继续播放旧块。
 
 ## 继承的设备约束
 
@@ -83,7 +120,7 @@ RTG 默认 `--trigger-fraction 0.5 --guidance-steps 3`，动作块中途异步�
 此参数也用于复用快速执行器的64维适配入口；慢速部署仍使用原来的0.08 rad默认值。
 双手模型越界角度沿用慢速连续入口的投影规则，保存原始预测与投影数量。
 
-任何机械臂节点段或RTG衔接段超过1 rad/s时，快速轨迹层逐关节按1 rad/s限幅并继续追赶目标，
+任何机械臂节点段或RTG/RTC衔接段超过1 rad/s时，快速轨迹层逐关节按1 rad/s限幅并继续追赶目标，
 日志记录被限幅的目标数量；原始模型预测仍保存在 `inference.npz`。它不改变30Hz时钟，也不会把
 网关拒绝隐藏为执行成功。网关1.2 rad/s只提供下发时钟余量，不会主动生成更快轨迹。手部目标可因SDK限速而滞后，
 所以30Hz计划不等于电机一定完整跟上30Hz轨迹。慢速试验成功不能证明这条原速路径已真机验证。
@@ -99,22 +136,99 @@ bash deploy/fr3_wuji/run.sh -m deploy.fr3_wuji_fast.inspect \
 
 每次使用 `logs/weight_motion_eval/fast-<id>/` 新目录：
 
-- `fast-config.json`、`runtime.json`：原速参数、设备、权重、继承限制。
-- `chunk-NNNN/inference.npz`：原始50×54预测和输入实测状态。
-- `chunk-NNNN/admission.json`：原始时间戳、请求ID、观测时效、任务指令。
-- `control/events.jsonl`：RTG有效节点、跳过步数、实际下发目标、SDK限速输出和反馈。
-- `fast-report.json`：完成/失败、接纳的动作块及原因；停止结果还需结合原桥接的 `device-exit.json`。
+- `fast-config.json`：RTC 配置位于 `options.rtc_initial_delay_steps`、
+  `options.rtc_delay_buffer_size`、`options.rtc_prefix_attention_schedule`、
+  `options.rtc_max_guidance_weight`；`runtime.json` 保存设备、权重和继承限制，不重复 RTC 上下文。
+- `chunk-NNNN/inference.npz`：原始50×54预测、输入实测状态；RTC 请求还以
+  `rtc_previous_actions` 保存送入模型的旧动作前缀。
+- `chunk-NNNN/admission.json`：原始时间戳、请求ID、观测时效、任务指令；RTC 字段位于 `rtc` 对象，
+  完整键为 `protocol_version`、`token`、`source_number`、`source_sha256`、
+  `inference_delay_steps`、`actual_websocket_delay_steps`、`prefix_attention_horizon`、
+  `prefix_attention_schedule`、`max_guidance_weight`、`receipt`。
+- `control/events.jsonl`：RTG/RTC有效节点、跳过步数、实际下发目标、SDK限速输出和反馈；RTC 换块事件的
+  `rtc` 对象完整键为 `token`、`source_number`、`source_sha256`、`predicted_delay_steps`、
+  `actual_delay_steps`、`prefix_attention_horizon`、`prefix_attention_schedule`、
+  `max_guidance_weight`。
+- `fast-report.json`：完成/失败、接纳的动作块及原因；`chunks[].rtc` 复制上述换块字段。停止结果还需
+  结合原桥接的 `device-exit.json`。
 - 原始手部记录、网关记录和控制循环诊断继续由已有设备模块生成。
 
-测试只使用虚拟设备；Unix socket与多进程测试也不连接硬件：
+现有测试设计只使用虚拟设备；Unix socket与多进程测试也不连接硬件。以下命令留给具备完整环境的
+工作站执行：
 
 ```bash
 env -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q -p no:cacheprovider deploy/fr3_wuji_fast
 ```
 
-覆盖30Hz节点和插值、RTG延迟补偿与实际衔接点、模型形状/单位契约、越界与超速拒绝、
+覆盖30Hz节点和插值、RTG/RTC延迟补偿与实际衔接点、RTC 回执绑定及不重复 cubic 拼接、
+模型形状/单位契约、越界与超速拒绝、
 动作块顺序/权重身份/原始期限、连续发送、推理缺失、调度超时、反馈过期、取消和断连停止。
 另有真实本机socket + 独立控制进程测试，使用原 `DeviceSession` 与原 IPC bridge 验证双块执行及释放。
+
+截至 **2026-10-13**，RTC 代码已准备完成，但当前电脑缺少项目依赖、GPU 和真机链路，因此这里
+**没有声称已运行 pytest、GPU/JAX JIT 或实机验证**。建议在另一台工作站按以下顺序验证：
+
+1. 在仓库根目录安装锁定依赖及快速入口额外依赖；根工作区会以 editable workspace 包安装
+   `packages/openpi-client`，因此另一台电脑必须同步包含本次新增的 `openpi_client.rtc`：
+
+   ```bash
+   git submodule update --init --recursive
+   GIT_LFS_SKIP_SMUDGE=1 uv sync --locked
+   GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+   uv pip install --python .venv/bin/python -r deploy/fr3_wuji_fast/requirements.txt
+   .venv/bin/python -c 'from openpi_client import rtc; import ruckig; print(rtc.PROTOCOL_VERSION, ruckig.__file__)'
+   ```
+
+   随后确认 19999 / 54D / JAX 服务配置和设备配置仍指向同一 checkpoint。
+2. 先运行快速部署全套无硬件测试：
+
+   ```bash
+   env -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+     .venv/bin/python -m pytest -q -p no:cacheprovider deploy/fr3_wuji_fast
+   ```
+
+3. 再运行 RTC 协议、模型引导和动作排列的定向测试：
+
+   ```bash
+   env -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+     .venv/bin/python -m pytest -q -p no:cacheprovider \
+     packages/openpi-client/src/openpi_client/rtc_test.py \
+     src/openpi/models/pi0_test.py \
+     src/openpi/policies/fr3_wuji_policy_test.py \
+     src/openpi/policies/policy_test.py -k rtc
+   ```
+
+4. 把 `CKPT` 改为目标机器上完整的19999步骤目录，用完整 RTC 参数做离线检查；该命令不连接模型
+   服务：
+
+   ```bash
+   CKPT=/absolute/path/to/19999
+   bash deploy/fr3_wuji_fast/run.sh --check --checkpoint "$CKPT" \
+     --broker-mode rtc \
+     --rtc-initial-delay-steps 5 \
+     --rtc-delay-buffer-size 10 \
+     --rtc-prefix-attention-schedule exp \
+     --rtc-max-guidance-weight 5
+   ```
+
+   再以同一个 checkpoint 启动 `bash deploy/fr3_wuji_fast/serve.sh --checkpoint "$CKPT"`；只有日志依次
+   出现 `Vanilla JAX inference warmup complete`、
+   `RTC guided JAX inference warmup complete` 和 `Checkpoint ready`，才表示监听前两条推理签名均已
+   编译/预热且 guided 回执已校验。另开终端执行一次不连接设备的合成请求并查看其打印的握手元数据：
+
+   ```bash
+   bash deploy/fr3_wuji/run.sh deploy/fr3_wuji/smoke_test.py \
+     --uri ws://127.0.0.1:8001 --count 1 \
+     --output logs/fr3_wuji/rtc-smoke.json
+   ```
+
+   元数据必须包含 `rtc_protocol_version=1`、`rtc_algorithm=soft_prefix_guidance`、
+   `rtc_warmed_up=true`，且 `rtc_prefix_attention_schedules` 包含 `exp`。这个 smoke 只发送普通合成推理，
+   guided 路径仍以服务启动预热和上一步定向 pytest 为准，输出动作不得送入硬件。
+5. 先做 RTG 回归，再在现场值守、低风险姿态和可立即停机条件下做 RTC 实机试验。`--rounds 1`
+   没有前一个动作块可供 RTC 拼接，至少需要 `--rounds 2` 才能覆盖 RTC 换块；结束仍建议 `disable`。
+6. 核对 `fast-config.json`、每块 `admission.json` / `inference.npz`、`control/events.jsonl` 和
+   `fast-report.json` 中的预测延迟、实测跳步、前缀 horizon、回执绑定和停止结果，再逐步扩大轮数。
 
 2026-09-14 抽查最近20条明确来自19999_269的历史预测，16条通过原始节点限位和机械臂原速检查，
 4条超过0.7rad/s。该结果仅验证静态动作数组，不验证现场首帧、RTG衔接、碰撞、物理跟踪或停止。
@@ -154,11 +268,13 @@ bash experiments/weight_motion_eval/oneshot/build_overlay.sh
 
 快速执行端现在在100Hz下发前使用本地 Ruckig 保留上一帧指令的位置、速度、加速度，
 对14个机械臂关节持续生成受约束的目标；动作块切换不重置生成器，块内部也经过同一处理。
-原RTG节点拼接与默认 `--guidance-steps 3` 不变，双手目标与SDK控制不变。
+RTG 节点拼接与默认 `--guidance-steps 3` 不变；RTC 则直接使用模型 soft prefix guidance 后的动作，
+不再做第二次 cubic 拼接。双手目标与SDK控制不变。
 首次接近、块间等待和末尾到位均使用同一生成器；末尾必须等生成器到达目标且停止，再检查实测停稳。
 急停、时效故障和反馈异常仍直接走原停止流程，不等待平滑。
 
-只影响 `fr3_wuji_fast` 及复用它的64维**快速**入口。中速 `fr3_wuji_medium`、
+Ruckig 只影响 `fr3_wuji_fast` 及复用它的64维**快速**入口；RTC 只支持19999 / 54D / JAX，
+不会因此扩展到64维。中速 `fr3_wuji_medium`、
 慢速播放器、共用设备代码、底层阻抗参数均未修改。此功能是执行端轨迹平滑，并非模型端RTC。
 
 调参位置：`deploy/fr3_wuji_fast/limits.py`：
@@ -174,7 +290,8 @@ ARM_JERK_RAD_S3 = 30.0        # rad/s³，加速度变化率
 手臂与手指的配合时序、接触动作和成功率需要复测。使用当前采样位置作为静止目标反复重规划，
 未将有突变的原始目标速度直接传入。生成器不使用远程服务或中间路点。
 
-新增依赖只由快速入口导入，安装固定版本（已有环境已安装）：
+新增依赖只由快速入口导入并固定版本；目标部署环境必须安装，不能把当前这台没有可用 `.venv` 的
+电脑视为已安装：
 
 ```bash
 .deployment/tools/bin/uv pip install --python .venv/bin/python -r deploy/fr3_wuji_fast/requirements.txt
