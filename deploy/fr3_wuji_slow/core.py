@@ -42,6 +42,17 @@ def checked_arm_speed(value):
     return float(value)
 
 
+def checked_arm_speed_policy(enforced, value):
+    """Validate the explicit arm-speed policy without numeric sentinels."""
+    if type(enforced) is not bool:
+        raise ValueError("Arm speed enforcement flag must be boolean")
+    if enforced:
+        return checked_arm_speed(value)
+    if value is not None:
+        raise ValueError("Disabled arm speed enforcement requires arm_speed_rad_s=None")
+    return None
+
+
 def speed_caps(arm_speed_rad_s):
     result = SPEED.copy()
     result[ARM] = checked_arm_speed(arm_speed_rad_s)
@@ -75,13 +86,18 @@ class Feedback:
     hand_targets_reached: bool = True
     hand_soft_limits: tuple = ()
     hand_contacts: tuple = ()
-    arm_speed_rad_s: float = 0.7
+    arm_speed_rad_s: float | None = 0.7
+    arm_speed_enforced: bool = True
 
     def __post_init__(self):
         object.__setattr__(self, "positions", vector(self.positions))
         object.__setattr__(self, "velocities", vector(self.velocities))
         check_hand_control(self.hand_control)
-        object.__setattr__(self, "_speed", speed_caps(self.arm_speed_rad_s))
+        arm_speed = checked_arm_speed_policy(self.arm_speed_enforced, self.arm_speed_rad_s)
+        object.__setattr__(self, "arm_speed_rad_s", arm_speed)
+        # SPEED still supplies the strict-hand ceilings when the arm policy is
+        # disabled. ARM entries are never consulted in that mode.
+        object.__setattr__(self, "_speed", speed_caps(arm_speed) if self.arm_speed_enforced else SPEED)
         limits = tuple(tuple(item) for item in self.hand_soft_limits)
         indices = set()
         for item in limits:
@@ -160,7 +176,12 @@ class Feedback:
             raise ValueError("Feedback clock epoch changed or device unhealthy")
         if any(not 0 <= now - t <= 0.15 for t in (*self.source_times, *self.receipt_times)):
             raise ValueError("Missing, future or stale device feedback")
-        indices = ARM if self.hand_control == "slider" else np.arange(54)
+        if self.hand_control == "slider":
+            indices = ARM if self.arm_speed_enforced else np.empty(0, dtype=int)
+        elif self.arm_speed_enforced:
+            indices = np.arange(54)
+        else:
+            indices = HAND
         exceeded = indices[np.abs(self.velocities[indices]) > self._speed[indices] + 1e-9]
         if exceeded.size:
             details = []
@@ -276,13 +297,27 @@ class ConsumerGuard:
     """
 
     def __init__(
-        self, lower, upper, *, hand_control="strict", arm_speed_rad_s=0.7, arm_tracking_rad=ARM_TRACKING_TOLERANCE_RAD
+        self,
+        lower,
+        upper,
+        *,
+        hand_control="strict",
+        arm_speed_rad_s=0.7,
+        arm_speed_enforced=True,
+        arm_tracking_rad=ARM_TRACKING_TOLERANCE_RAD,
     ):
         self.arm_tracking_rad = checked_arm_tracking_tolerance(arm_tracking_rad)
         self.hand_control = check_hand_control(hand_control)
         self.checked = ARM if hand_control == "slider" else np.arange(54)
-        self.arm_speed_rad_s = checked_arm_speed(arm_speed_rad_s)
-        self.speed = speed_caps(self.arm_speed_rad_s)
+        self.arm_speed_enforced = arm_speed_enforced
+        self.arm_speed_rad_s = checked_arm_speed_policy(arm_speed_enforced, arm_speed_rad_s)
+        self.speed = speed_caps(self.arm_speed_rad_s) if self.arm_speed_enforced else SPEED
+        if hand_control == "slider":
+            self.speed_checked = ARM if self.arm_speed_enforced else np.empty(0, dtype=int)
+        elif self.arm_speed_enforced:
+            self.speed_checked = np.arange(54)
+        else:
+            self.speed_checked = HAND
         self.lower, self.upper = vector(lower), vector(upper)
         if np.any(self.lower >= self.upper):
             raise ValueError("Invalid position bounds")
@@ -293,8 +328,11 @@ class ConsumerGuard:
         if self.state != "new":
             raise ValueError("Output consumer is single-use")
         feedback.check(now, feedback.epoch)
-        if feedback.arm_speed_rad_s != self.arm_speed_rad_s:
-            raise ValueError("Arm speed mode mismatch")
+        if (feedback.arm_speed_enforced, feedback.arm_speed_rad_s) != (
+            self.arm_speed_enforced,
+            self.arm_speed_rad_s,
+        ):
+            raise ValueError("Arm speed mode mismatch (policy/value)")
         if feedback.hand_control != self.hand_control:
             raise ValueError("Hand control mode mismatch")
         if not run_id or not digest or np.any(np.abs(feedback.velocities[self.checked]) > 0.02):
@@ -307,8 +345,11 @@ class ConsumerGuard:
         if self.state != "armed":
             raise ValueError("Output consumer is not armed")
         feedback.check(now, self.epoch)
-        if feedback.arm_speed_rad_s != self.arm_speed_rad_s:
-            raise ValueError("Arm speed mode changed")
+        if (feedback.arm_speed_enforced, feedback.arm_speed_rad_s) != (
+            self.arm_speed_enforced,
+            self.arm_speed_rad_s,
+        ):
+            raise ValueError("Arm speed mode changed (policy/value)")
         if feedback.hand_control != self.hand_control:
             raise ValueError("Hand control mode changed")
         if (frame.run_id, frame.plan_hash) != (self.run_id, self.digest):
@@ -317,7 +358,7 @@ class ConsumerGuard:
             raise ValueError("Expired or future command at final consumer")
         if np.any(frame.positions < self.lower) or np.any(frame.positions > self.upper):
             raise ValueError("Command position exceeds joint limits")
-        if np.any(np.abs(frame.velocities[self.checked]) > self.speed[self.checked] + 1e-9):
+        if np.any(np.abs(frame.velocities[self.speed_checked]) > self.speed[self.speed_checked] + 1e-9):
             raise ValueError("Command derivative exceeds joint speed ceiling")
         check_tracking(frame.positions, feedback, self.checked, "Tracking", arm_tracking_rad=self.arm_tracking_rad)
         if self.last is None:
@@ -333,10 +374,15 @@ class ConsumerGuard:
             if not 0 < dt <= 0.030000001:
                 raise ValueError("Consumer command stream stalled; no catch-up")
             if np.any(
-                np.abs(frame.positions[self.checked] - self.last.positions[self.checked])
-                > self.speed[self.checked] * dt + 1e-8
+                np.abs(frame.positions[self.speed_checked] - self.last.positions[self.speed_checked])
+                > self.speed[self.speed_checked] * dt + 1e-8
             ):
-                raise ValueError(f"Command slew exceeds arm {self.arm_speed_rad_s:g} rad/s or hand 45 deg/s")
+                detail = (
+                    f"arm {self.arm_speed_rad_s:g} rad/s or hand 45 deg/s"
+                    if self.arm_speed_enforced
+                    else "hand 45 deg/s"
+                )
+                raise ValueError("Command slew exceeds " + detail)
 
     def commit(self, frame):
         self.last = frame

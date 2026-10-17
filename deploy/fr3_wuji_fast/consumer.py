@@ -19,6 +19,7 @@ from deploy.fr3_wuji_slow.continuous import StopFlag
 from deploy.fr3_wuji_slow.core import Admission
 
 from .control import worker
+from .timeline import arm_motion_settings
 from .timeline import checked_chunk
 from .timeline import future_nodes
 from .timeline import prepare_initial
@@ -31,6 +32,7 @@ class FastConsumer:
         self.codec, self.devices, self.ws = msgpack_numpy, devices, ws
         self.model, self.limits, self.output = model, limits, Path(output)
         self.options, self.config_path = options, config_path
+        self.arm_motion = arm_motion_settings(options.get("arm_motion_limits", "disabled"))
         self.context = mp.get_context("spawn")
         self.incoming, self.status = self.context.Queue(1), self.context.Queue(128)
         self.stop_flag = StopFlag(self.context)
@@ -48,6 +50,7 @@ class FastConsumer:
             "control_hz": 100,
             "hardware_output": True,
             "options": options,
+            "arm_motion": self.arm_motion,
             "model": model,
             "chunks": [],
         }
@@ -72,6 +75,18 @@ class FastConsumer:
                 self.request = event
             elif kind == "stage":
                 print("【阶段】" + event["text"], flush=True)
+            elif kind == "arm_motion_limits":
+                actual = {key: event[key] for key in self.arm_motion}
+                if actual != self.arm_motion:
+                    raise RuntimeError("Control process arm motion-limit policy mismatch")
+                if event["arm_speed_enforced"]:
+                    text = "legacy（30 Hz 1 rad/s 投影及 100 Hz Ruckig 1/3/30 已启用）"
+                else:
+                    text = (
+                        "disabled（模型回放不做机械臂速度投影或 Ruckig v/a/jerk 限制；"
+                        "位置、0.2 rad 跟踪、反馈时效和停止保护仍启用）"
+                    )
+                print("【机械臂运动限制】" + text, flush=True)
             elif kind == "chunk_started":
                 self.report["chunks"].append({k: v for k, v in event.items() if k != "executed_nodes"})
                 if "rtc" in event:
@@ -235,7 +250,14 @@ class FastConsumer:
         self.poll()
         if self.process is None:
             feedback = self.devices.feedback(time.monotonic())
-            initial = prepare_initial(chunk, feedback.positions, self.limits, self.config_path, time.monotonic())
+            initial = prepare_initial(
+                chunk,
+                feedback.positions,
+                self.limits,
+                self.config_path,
+                time.monotonic(),
+                arm_motion_limits=self.arm_motion["arm_motion_limits"],
+            )
             self.report.update(
                 state="running", stream_digest=initial.digest, approach_seconds=initial.approach.duration
             )

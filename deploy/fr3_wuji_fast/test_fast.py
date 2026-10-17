@@ -54,10 +54,18 @@ def chunk(number=1, sent=9.85, received=9.9, raw=None):
 class Devices:
     """Perfect position feedback; validate with the production final consumer."""
 
-    def __init__(self, clock):
+    def __init__(self, clock, *, arm_motion_limits="disabled"):
         self.clock = clock
         self.q = np.zeros(54)
-        self.guard = ConsumerGuard(LIMITS["lower"], LIMITS["upper"], hand_control="slider", arm_speed_rad_s=1.0)
+        self.arm_speed_enforced = arm_motion_limits == "legacy"
+        self.arm_speed_rad_s = 1.0 if self.arm_speed_enforced else None
+        self.guard = ConsumerGuard(
+            LIMITS["lower"],
+            LIMITS["upper"],
+            hand_control="slider",
+            arm_speed_enforced=self.arm_speed_enforced,
+            arm_speed_rad_s=self.arm_speed_rad_s,
+        )
         self.frames = []
         self.prepares = self.finishes = 0
         self.last_submission = {}
@@ -69,7 +77,8 @@ class Devices:
             (now,) * 4,
             (now,) * 4,
             hand_control="slider",
-            arm_speed_rad_s=1.0,
+            arm_speed_enforced=self.arm_speed_enforced,
+            arm_speed_rad_s=self.arm_speed_rad_s,
         )
 
     def prepare(self, player, fb, now):
@@ -89,8 +98,15 @@ class Devices:
         self.finishes += 1
 
 
-def initial(first=None, now=10):
-    return prepare_initial(first or chunk(), np.zeros(54), LIMITS, CONFIG, now)
+def initial(first=None, now=10, *, arm_motion_limits="disabled"):
+    return prepare_initial(
+        first or chunk(),
+        np.zeros(54),
+        LIMITS,
+        CONFIG,
+        now,
+        arm_motion_limits=arm_motion_limits,
+    )
 
 
 def test_defaults_match_19999_hardware_without_changing_slow_defaults():
@@ -99,6 +115,7 @@ def test_defaults_match_19999_hardware_without_changing_slow_defaults():
     assert not args.execute
     assert not args.read_only
     assert args.broker_mode == "rtg"
+    assert args.arm_motion_limits == "disabled"
     assert args.guidance_steps == 3
     assert args.trigger_fraction == 0.5
     assert args.rtc_initial_delay_steps == 5
@@ -123,6 +140,7 @@ def test_defaults_match_19999_hardware_without_changing_slow_defaults():
         ["--broker-mode", "rtc", "--rtc-initial-delay-steps", "26"],
         ["--rtc-delay-buffer-size", "0"],
         ["--rtc-max-guidance-weight", "nan"],
+        ["--arm-motion-limits", "unknown"],
         ["--execute"],
         ["--supervised-trial"],
         ["--left-arm-ip", "wrong"],
@@ -163,10 +181,26 @@ def test_foreign_model_shapes_and_nonfinite_outputs_rejected(raw):
         chunk(raw=raw)
 
 
-def test_original_speed_violation_runs_at_one_rad_per_second():
+def test_default_initial_preparation_preserves_model_arm_rate():
     raw = np.zeros((50, 54))
     raw[1:, 0] = 0.1
     prepared = initial(chunk(raw=raw))
+    assert prepared.chunk.arm_rate_limited_values == 0
+    np.testing.assert_array_equal(prepared.chunk.actions, raw)
+    assert np.max(np.abs(np.diff(prepared.chunk.actions[:, ARM], axis=0))) * 30 == pytest.approx(3.0)
+
+
+def test_legacy_initial_preparation_still_projects_to_one_rad_per_second():
+    raw = np.zeros((50, 54))
+    raw[1:, 0] = 0.1
+    prepared = prepare_initial(
+        chunk(raw=raw),
+        np.zeros(54),
+        LIMITS,
+        CONFIG,
+        10,
+        arm_motion_limits="legacy",
+    )
     assert prepared.chunk.arm_rate_limited_values > 0
     assert np.max(np.abs(np.diff(prepared.chunk.actions[:, ARM], axis=0))) == pytest.approx(1 / 30)
     check_arm_speed(prepared.chunk.actions)
@@ -181,14 +215,14 @@ def test_rate_limiter_tracks_targets_at_one_rad_per_second_and_catches_up():
     check_arm_speed(limited)
 
 
-def test_rtg_cubic_overspeed_is_limited_instead_of_rejected():
+def test_rtg_cubic_overspeed_is_preserved_without_rate_projection():
     timeline = Timeline(chunk(), rounds=2)
     timeline.start(10)
     timeline.request(10 + 25 / 30)
     new = chunk(2, 10.84, 10.98, raw=np.full((50, 54), 0.1))
     event = timeline.install(new, 11, LIMITS)
-    assert event["arm_rate_limited_values"] > 0
-    check_arm_speed(timeline.actions)
+    assert event["arm_rate_limited_values"] == 0
+    assert np.max(np.abs(np.diff(timeline.actions[:, ARM], axis=0))) * 30 > 1
 
 
 def test_rtg_splice_compensates_latency_and_blends_at_actual_offset():
@@ -226,6 +260,7 @@ def test_rtc_splice_binds_prefix_skips_actual_latency_and_avoids_cubic_blend():
         }
     )
     raw = np.full((50, 54), 0.02)
+    raw[6::2, 0] = 0.20
     new = checked_chunk(
         raw,
         Admission(10.82, 10.84, 10.98, "request-2", "weights", 0),
@@ -241,6 +276,8 @@ def test_rtc_splice_binds_prefix_skips_actual_latency_and_avoids_cubic_blend():
     assert event["rtc"]["predicted_delay_steps"] == 5
     assert event["rtc"]["actual_delay_steps"] == 5
     np.testing.assert_array_equal(timeline.actions, raw[5:])
+    assert event["arm_rate_limited_values"] == 0
+    assert np.max(np.abs(np.diff(timeline.actions[:, ARM], axis=0))) * 30 > 1
     assert timeline.pending_rtc is None
 
 
@@ -334,7 +371,7 @@ def test_rejected_splice_does_not_replace_current_actions(case):
     else:
         new.actions[:] = 3.0
     old = t.actions.copy()
-    with pytest.raises(ValueError, match="Unexpected|stale|speed exceeds|RTG splice"):
+    with pytest.raises(ValueError, match="Unexpected|stale|RTG splice"):
         t.install(new, now, LIMITS)
     assert t.number == 1
     assert t.pending_since is not None
@@ -346,8 +383,13 @@ def test_serial_requests_after_full_chunk_and_does_not_skip_latency_steps():
     t.start(10.0)
     assert not t.request_due(11.6)
     t.request(10 + 50 / 30)
-    new = chunk(2, 11.68, 11.78, raw=np.full((50, 54), 0.02))
-    assert t.install(new, 11.8, LIMITS)["latency_offset_steps"] == 0
+    raw = np.full((50, 54), 0.02)
+    raw[4::2, 0] = 0.20
+    new = chunk(2, 11.68, 11.78, raw=raw)
+    event = t.install(new, 11.8, LIMITS)
+    assert event["latency_offset_steps"] == 0
+    assert event["arm_rate_limited_values"] == 0
+    assert np.max(np.abs(np.diff(t.actions[:, ARM], axis=0))) * 30 > 1
 
 
 def test_two_chunks_run_continuously_through_existing_guard():

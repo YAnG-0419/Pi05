@@ -17,6 +17,8 @@ def with_defaults(argv):
         args.extend(("--checkpoint", str(DEFAULT_CHECKPOINT)))
     if "--uri" not in args and not any(arg.startswith("--uri=") for arg in args):
         args.extend(("--uri", DEFAULT_URI))
+    if "--arm-motion-limits" not in args and not any(arg.startswith("--arm-motion-limits=") for arg in args):
+        args.extend(("--arm-motion-limits", "legacy"))
     return args
 
 

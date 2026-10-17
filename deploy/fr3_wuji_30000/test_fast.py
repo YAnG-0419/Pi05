@@ -19,12 +19,26 @@ def test_fast_defaults_select_v2_and_port_8002():
         str(ROOT / "checkpoints/30000v2"),
         "--uri",
         "ws://127.0.0.1:8002",
+        "--arm-motion-limits",
+        "legacy",
     ]
 
 
 def test_explicit_values_are_preserved():
     args = fast.with_defaults(["--check", "--checkpoint=/tmp/model", "--uri=ws://127.0.0.1:9000"])
-    assert args == ["--check", "--checkpoint=/tmp/model", "--uri=ws://127.0.0.1:9000"]
+    assert args == [
+        "--check",
+        "--checkpoint=/tmp/model",
+        "--uri=ws://127.0.0.1:9000",
+        "--arm-motion-limits",
+        "legacy",
+    ]
+
+
+def test_explicit_disabled_motion_policy_is_preserved():
+    args = fast.with_defaults(["--check", "--arm-motion-limits=disabled"])
+    assert "--arm-motion-limits=disabled" in args
+    assert args.count("--arm-motion-limits") == 0
 
 
 def test_v2_contract_is_fast_pipeline_compatible():

@@ -29,7 +29,26 @@ from .smoothing import smoothing_settings
 SOURCE_HZ = 30
 CONTROL_HZ = 100
 HORIZON = 50
-ARM_SPEED_RAD_S = 1.0
+ARM_SPEED_RAD_S = 1.0  # Legacy profile only; disabled is the Fast default.
+ARM_MOTION_LIMITS = ("disabled", "legacy")
+
+
+def checked_arm_motion_limits(value):
+    if value not in ARM_MOTION_LIMITS:
+        raise ValueError("Arm motion limits must be disabled or legacy")
+    return value
+
+
+def arm_motion_settings(value):
+    """Return the explicit speed/smoothing policy carried across processes."""
+    policy = checked_arm_motion_limits(value)
+    enforced = policy == "legacy"
+    return {
+        "arm_motion_limits": policy,
+        "arm_speed_enforced": enforced,
+        "arm_speed_rad_s": ARM_SPEED_RAD_S if enforced else None,
+        "arm_smoothing": smoothing_settings() if enforced else None,
+    }
 
 
 @dataclass
@@ -154,15 +173,20 @@ class Initial:
     approach: object
     digest: str
     prepared_at: float
+    arm_motion_limits: str
 
 
-def prepare_initial(chunk, start, limits, config_path, now):
+def prepare_initial(chunk, start, limits, config_path, now, *, arm_motion_limits="disabled"):
     start = vector(start)
     if np.any(start < limits["lower"]) or np.any(start > limits["upper"]):
         raise ValueError("Measured initial state outside joint limits")
-    limited, changed = limit_arm_speed(chunk.actions)
-    chunk = replace(chunk, actions=limited, arm_rate_limited_values=changed)
-    check_arm_speed(chunk.actions)
+    motion = arm_motion_settings(arm_motion_limits)
+    if motion["arm_speed_enforced"]:
+        actions, changed = limit_arm_speed(chunk.actions)
+        check_arm_speed(actions)
+    else:
+        actions, changed = chunk.actions.copy(), 0
+    chunk = replace(chunk, actions=actions, arm_rate_limited_values=changed)
     config = read_config(config_path)
     config = dict(config, hand_control="slider")
     if np.max(np.abs(start[ARM] - chunk.actions[0, ARM])) > config["arm_raw_initial_delta_rad"]:
@@ -178,14 +202,13 @@ def prepare_initial(chunk, start, limits, config_path, now):
             "request": chunk.admission.request_id,
             "source_hz": SOURCE_HZ,
             "control_hz": CONTROL_HZ,
-            "arm_speed_rad_s": ARM_SPEED_RAD_S,
-            "arm_smoothing": smoothing_settings(),
+            **motion,
             "config": config,
         },
         sort_keys=True,
     )
     digest = hashlib.sha256(binding.encode() + start.astype("<f8").tobytes()).hexdigest()
-    return Initial(chunk, start, approach, digest, now)
+    return Initial(chunk, start, approach, digest, now, motion["arm_motion_limits"])
 
 
 class Timeline:
@@ -203,6 +226,7 @@ class Timeline:
         rtc_delay_buffer_size=10,
         rtc_prefix_attention_schedule="exp",
         rtc_max_guidance_weight=5.0,
+        arm_motion_limits="disabled",
     ):
         if type(rounds) is not int or not 1 <= rounds <= 1000 or mode not in {"rtg", "rtc", "serial"}:
             raise ValueError("Invalid stream mode/round count")
@@ -233,6 +257,7 @@ class Timeline:
         self.rtc_delay_buffer_size = rtc_delay_buffer_size
         self.rtc_prefix_attention_schedule = rtc_prefix_attention_schedule
         self.rtc_max_guidance_weight = float(rtc_max_guidance_weight)
+        self.arm_motion_limits = checked_arm_motion_limits(arm_motion_limits)
         self.actions = first.actions.copy()
         self.number, self.offset = 1, 0
         self.started = None
@@ -324,16 +349,20 @@ class Timeline:
             if offset > context.prefix_attention_horizon:
                 raise ValueError("Actual RTC delay exceeded the conditioned prefix horizon")
             # Model-side guidance owns continuity in RTC mode. Keep actual
-            # latency skipping and downstream safety projections, but do not
-            # apply the RTG cubic splice a second time.
+            # latency skipping, but do not apply the RTG cubic splice a second
+            # time. The selected arm policy below decides whether legacy speed
+            # projection is applied.
             actions = chunk.actions[offset:].copy()
         else:
             anchor, _ = self.sample(now)
             actions = smooth_prefix(chunk.actions[offset:], anchor, self.guidance_steps)
         if np.any(actions < limits["lower"]) or np.any(actions > limits["upper"]):
             raise ValueError(f"{self.mode.upper()} splice exceeds joint limits")
-        actions, rate_limited = limit_arm_speed(actions)
-        check_arm_speed(actions)
+        if self.arm_motion_limits == "legacy":
+            actions, rate_limited = limit_arm_speed(actions)
+            check_arm_speed(actions)
+        else:
+            rate_limited = 0
         # All checks precede replacement; failed predictions cannot leak a frame.
         self.actions, self.offset, self.number = actions, offset, chunk.number
         self.started, self.pending_since, self.pending_rtc = now, None, None

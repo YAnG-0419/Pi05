@@ -27,11 +27,61 @@ def checked_gateway_arm_speed(value):
 
 
 class ArmBoundary:
-    def __init__(self, gate):
+    def __init__(self, gate, *, arm_speed_enforced=True):
+        if type(arm_speed_enforced) is not bool:
+            raise ValueError("Arm speed enforcement flag must be boolean")
         self.gate = gate
+        self.arm_speed_enforced = arm_speed_enforced
         self.session = None
         self.sequence = None
         self.fault = None
+
+    @staticmethod
+    def _transparent_slew_speed(gate, message, measured, now_mono):
+        """Return a finite per-request speed that cannot clip this request.
+
+        CommandSafetyGate still performs its normal validation. Only its slew
+        limiter is made transparent, and the configured value is restored before
+        the candidate gate becomes live.
+        """
+        target = np.asarray(message.positions, dtype=float)
+        measured = np.asarray(measured, dtype=float)
+        if (
+            target.shape != (14,)
+            or measured.shape != (14,)
+            or not np.isfinite(target).all()
+            or not np.isfinite(measured).all()
+        ):
+            return gate.max_joint_speed
+        required = 0.0
+        for side_index, side in enumerate(("left", "right")):
+            offset = side_index * 7
+            previous = gate.last_output[side]
+            last_time = gate.last_time[side]
+            dt = (
+                min(0.1, max(gate.nominal_dt, now_mono - last_time))
+                if last_time is not None
+                else gate.nominal_dt
+            )
+            if not np.isfinite(dt) or dt <= 0:
+                return gate.max_joint_speed
+            previous = np.asarray(previous, dtype=float) if previous is not None else measured[offset : offset + 7]
+            if previous.shape != (7,) or not np.isfinite(previous).all():
+                return gate.max_joint_speed
+            with np.errstate(over="ignore", invalid="ignore"):
+                delta = np.abs(target[offset : offset + 7] - previous)
+            if not np.isfinite(delta).all():
+                return gate.max_joint_speed
+            side_required = float(np.max(delta)) / dt
+            if not np.isfinite(side_required):
+                return gate.max_joint_speed
+            required = max(required, side_required)
+        # A scale-relative finite margin avoids roundoff turning an exact request
+        # bound into a one-ulp clip. This is request-derived, not a large sentinel.
+        transparent = required + max(1.0, required) * 1e-12
+        if not np.isfinite(transparent):
+            return gate.max_joint_speed
+        return max(float(gate.max_joint_speed), transparent)
 
     def accept(self, message, measured, torques, now_mono, now_wall_ns):
         if self.fault:
@@ -52,6 +102,9 @@ class ArmBoundary:
                 raise ValueError("Both external-torque estimates are required")
             # Validate a copy so partial acceptance never changes the live gate.
             candidate = copy.deepcopy(self.gate)
+            configured_speed = candidate.max_joint_speed
+            if not self.arm_speed_enforced:
+                candidate.max_joint_speed = self._transparent_slew_speed(candidate, message, measured, now_mono)
             result = candidate.validate(
                 message.active_sides,
                 message.joint_names,
@@ -85,7 +138,7 @@ class ArmBoundary:
                         contact = joint + 1 in candidate.pressing_joints[side]
                         delta = float(target[index] - previous[joint])
                         max_step = candidate.max_joint_speed * dt
-                        slew = abs(delta) > max_step + 1e-9
+                        slew = self.arm_speed_enforced and abs(delta) > max_step + 1e-9
                         causes = (["接触力矩保护"] if contact else []) + (["变化率限制"] if slew else [])
                         details.append(
                             {
@@ -108,6 +161,7 @@ class ArmBoundary:
                     "Gateway contact/slew protection changed the planned target; 网关拒绝详情="
                     + json.dumps({"sequence": sequence, "joints": details}, ensure_ascii=False)
                 )
+            candidate.max_joint_speed = configured_speed
             self.gate, self.session, self.sequence = candidate, run, sequence
             return result
         except ValueError as error:
@@ -119,7 +173,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("role", choices=("gateway", "splitter"))
     parser.add_argument("--reference", type=Path, default=Path("/workspace/franka_upper_body_teleop"))
-    parser.add_argument("--arm-speed-rad-s", type=checked_gateway_arm_speed, default=0.7)
+    speed = parser.add_mutually_exclusive_group()
+    speed.add_argument("--arm-speed-rad-s", type=checked_gateway_arm_speed)
+    speed.add_argument("--disable-arm-speed-limit", action="store_true")
     parser.add_argument("--diagnostics", type=Path)
     args = parser.parse_args()
     sys.path.insert(0, str(args.reference / "ros_ws/src/teleop_core"))
@@ -147,7 +203,12 @@ def main():
     if params["max_joint_speed"] != 0.7 or params["max_initial_delta"] != 0.05:
         raise ValueError("Reference gateway limits changed")
 
-    params["max_joint_speed"] = args.arm_speed_rad_s
+    arm_speed_enforced = not args.disable_arm_speed_limit
+    arm_speed_rad_s = 0.7 if args.arm_speed_rad_s is None and arm_speed_enforced else args.arm_speed_rad_s
+    if not arm_speed_enforced and arm_speed_rad_s is not None:
+        raise ValueError("Disabled arm speed enforcement requires arm_speed_rad_s=None")
+    if arm_speed_enforced:
+        params["max_joint_speed"] = arm_speed_rad_s
 
     # Pi05 supervised deployment contact thresholds, Nm for each arm.
     params["contact_torque_thresholds"] = [20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0]
@@ -160,7 +221,10 @@ def main():
     class Gateway(Node):
         def __init__(self):
             super().__init__("pi05_oneshot_gateway")
-            self.get_logger().info(f"Pi05 arm speed limit rad/s: {params['max_joint_speed']}")
+            self.get_logger().info(
+                "Pi05 arm speed limit rad/s: "
+                + (str(params["max_joint_speed"]) if arm_speed_enforced else "disabled")
+            )
             self.get_logger().info("Pi05 contact thresholds Nm: " + str(params["contact_torque_thresholds"]))
             self.boundary = ArmBoundary(
                 CommandSafetyGate(
@@ -168,7 +232,8 @@ def main():
                         k: params[k]
                         for k in ("max_joint_speed", "max_initial_delta", "nominal_dt", "contact_torque_thresholds")
                     }
-                )
+                ),
+                arm_speed_enforced=arm_speed_enforced,
             )
             self.states, self.torques = {}, {}
             self.reset_active = None

@@ -25,8 +25,8 @@ from experiments.weight_motion_eval.reference import deployment_module
 
 from .limits import ARM_TRACKING_TOLERANCE_RAD
 from .smoothing import ArmSmoother
-from .timeline import ARM_SPEED_RAD_S
 from .timeline import Timeline
+from .timeline import arm_motion_settings
 
 
 def settled(feedback, target):
@@ -41,6 +41,9 @@ def settled(feedback, target):
 def run_control(
     devices, first, limits, options, incoming, notify, emit, stopping, *, clock=time.monotonic, sleep=time.sleep
 ):
+    motion = arm_motion_settings(options.get("arm_motion_limits", "disabled"))
+    if first.arm_motion_limits != motion["arm_motion_limits"]:
+        raise ValueError("Prepared initial plan/control arm motion-limit policy mismatch")
     timeline = Timeline(first.chunk, **options)
     run_id = uuid.uuid4().hex
     player = SimpleNamespace(run_id=run_id, digest=first.digest, plan=SimpleNamespace(start=first.start))
@@ -55,8 +58,11 @@ def run_control(
 
     def check_initial():
         fb.check(clock(), first.chunk.admission.epoch)
-        if fb.arm_speed_rad_s != ARM_SPEED_RAD_S:
-            raise ValueError("Fast controller/device arm speed configuration mismatch")
+        if (
+            fb.arm_speed_enforced is not motion["arm_speed_enforced"]
+            or fb.arm_speed_rad_s != motion["arm_speed_rad_s"]
+        ):
+            raise ValueError("Fast controller/device arm motion-limit configuration mismatch")
         if fb.hand_control != "slider":
             raise ValueError("Normal-speed deployment requires the existing slider device mode")
         if not first.prepared_at <= clock() <= first.prepared_at + 30:
@@ -71,8 +77,12 @@ def run_control(
     phase, sequence = "approach", 0
     due = began = phase_began = clock()
     stable_since = None
-    smoother = ArmSmoother(first.start, limits, began, speed=ARM_SPEED_RAD_S)
-    notify({"event": "arm_smoothing", "settings": smoother.settings, "speed_rad_s": ARM_SPEED_RAD_S})
+    smoother = (
+        ArmSmoother(first.start, limits, began, speed=motion["arm_speed_rad_s"])
+        if motion["arm_speed_enforced"]
+        else None
+    )
+    notify({"event": "arm_motion_limits", **motion})
     overall_deadline = began + first.approach.duration + options["rounds"] * 4 + 50
     notify({"event": "stage", "text": "首帧受控接近；到位后进入 30 Hz 原时间轴"})
     while not stopping():
@@ -107,7 +117,7 @@ def run_control(
         else:
             q = first.chunk.actions[0].copy() if phase == "settle_start" else timeline.actions[-1].copy()
             dq = np.zeros(54)
-            if smoother.settled(q) and settled(fb, q):
+            if (smoother is None or smoother.settled(q)) and settled(fb, q):
                 stable_since = now if stable_since is None else stable_since
                 if now - stable_since >= 0.5:
                     if phase == "settle_end":
@@ -118,7 +128,9 @@ def run_control(
                                 "chunks": timeline.number,
                                 "elapsed_seconds": now - began,
                                 "frames": sequence,
-                                "arm_smoothing_max_deviation_rad": smoother.max_deviation,
+                                "arm_smoothing_max_deviation_rad": (
+                                    smoother.max_deviation if smoother is not None else None
+                                ),
                             }
                         )
                         return
@@ -142,9 +154,14 @@ def run_control(
             timeout = HAND_CONTACT_SETTLE_SECONDS if fb.contact_indices(q) else 5.0
             if phase != "playback" and now - phase_began > timeout:
                 raise RuntimeError("Measured endpoint settling timed out")
+        if not np.isfinite(q).all() or not np.isfinite(dq).all():
+            raise ValueError("Normal-speed command is nonfinite")
+        if np.any(q < limits["lower"]) or np.any(q > limits["upper"]):
+            raise ValueError("Normal-speed command outside joint limits")
         raw_arm_target = q[ARM].copy()
-        q, dq = smoother.step(q, dq, now)
-        if sequence % 10 == 0:
+        if smoother is not None:
+            q, dq = smoother.step(q, dq, now)
+        if smoother is not None and sequence % 10 == 0:
             notify(
                 {
                     "event": "arm_smoothing_sample",
@@ -171,7 +188,15 @@ def run_control(
 
 
 def worker(sock, counter, finish_policy, first, limits, options, incoming, status, stop_flag, output):
-    devices = RemoteDevices(None, execute=True, finish_policy=finish_policy, sock=sock, arm_speed_rad_s=ARM_SPEED_RAD_S)
+    motion = arm_motion_settings(options.get("arm_motion_limits", "disabled"))
+    devices = RemoteDevices(
+        None,
+        execute=True,
+        finish_policy=finish_policy,
+        sock=sock,
+        arm_speed_enforced=motion["arm_speed_enforced"],
+        arm_speed_rad_s=motion["arm_speed_rad_s"],
+    )
     devices.counter = counter
     recorder = None
     local = queue.Queue(maxsize=1)

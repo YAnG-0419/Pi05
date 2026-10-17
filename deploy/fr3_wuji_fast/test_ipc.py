@@ -82,7 +82,8 @@ def test_spawned_rtg_worker_uses_original_device_session_and_releases(tmp_path):
         limits,
         execute=True,
         hand_control="slider",
-        arm_speed_rad_s=1.0,
+        arm_speed_enforced=False,
+        arm_speed_rad_s=None,
         arm_tracking_rad=ARM_TRACKING_TOLERANCE_RAD,
         qualification=SimpleNamespace(check_hand=lambda *a: None),
     )
@@ -104,7 +105,19 @@ def test_spawned_rtg_worker_uses_original_device_session_and_releases(tmp_path):
     prepared = prepare_initial(first, np.zeros(54), limits, ROOT / "experiments/weight_motion_eval/config.yaml", now)
     incoming, status, flag = context.Queue(1), context.Queue(128), StopFlag(context)
     process = context.Process(
-        target=worker, args=(left, 0, "disable", prepared, limits, {"rounds": 2}, incoming, status, flag, str(tmp_path))
+        target=worker,
+        args=(
+            left,
+            0,
+            "disable",
+            prepared,
+            limits,
+            {"rounds": 2, "arm_motion_limits": "disabled"},
+            incoming,
+            status,
+            flag,
+            str(tmp_path),
+        ),
     )
     process.start()
     left.close()

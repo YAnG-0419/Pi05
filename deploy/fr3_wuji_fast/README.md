@@ -1,4 +1,4 @@
-# 19999 正常速度部署（RTG / RTC）
+# 19999 正常速度部署（RTG / RTC / serial）
 
 独立入口，基于 Wuji 官方 RTG 的动作块管理方式适配本机 FR3 双臂 + Wuji 双手。
 模型动作按 **30 Hz 原时间轴**播放，独立进程插值为 **100 Hz 设备下发**；不使用慢速播放器的
@@ -7,13 +7,21 @@
 
 本入口新增显式 `--broker-mode rtc`：模型端用 soft prefix guidance 让新动作块对齐尚未执行的
 旧动作前缀，客户端再按本次推理的**实际单调时钟延迟**跳过已经过期的节点。RTC 是推理时引导，
-不训练或替换 checkpoint，也不等同于执行端 Ruckig。RTC 接入时不再叠加 RTG 的 cubic 前缀拼接。
+不训练或替换 checkpoint，也不等同于执行端的运动限值。RTC 接入时不再叠加 RTG 的 cubic 前缀拼接。
 
 模型服务、观测采集、FR3 网关/控制器、Wuji SDK 设备拥有者均导入或调用原有
-19999 部署代码。共用接口新增会话级机械臂速度参数：快速入口显式传入 **1 rad/s**，
-慢速及其他调用保留默认 **0.7 rad/s**；快速网关的最终容差为 **1.2 rad/s**，用于吸收100Hz
-调度误差，快速轨迹目标仍限幅在1 rad/s。不修改全局速度常量、外部控制器或依赖。
-两个执行入口共用原设备锁，不能同时占用硬件。
+19999 部署代码。`--arm-motion-limits` 可选 `disabled` / `legacy`；19999 Fast默认值为
+`disabled`。在不传该参数时，RTG、RTC、serial三种broker
+都按模型的30 Hz原时间轴回放，默认不再对正常模型回放增加机械臂关节速度、加速度或jerk软件上限，
+也不使用原来的1 rad/s轨迹投影、Ruckig 1/3/30约束或网关1.2 rad/s变化率阈值。
+需要回退旧行为时显式传 `--arm-motion-limits legacy`。该选项恢复1 rad/s速度、3 rad/s²加速度、
+30 rad/s³ jerk和网关1.2 rad/s阈值。慢速、中速以及30000v2 Fast专用包装的默认值不随此改变；
+30000v2 Fast包装默认仍选择 `legacy`。两个执行入口共用原设备锁，不能同时占用硬件。
+
+这里取消的是**正常模型回放阶段的本地机械臂动态软件限值**，不是取消全部保护，更不表示机械臂
+在物理上“无限速”。首次接管仍使用受控接近；关节位置范围、0.2 rad跟踪误差、接触力矩与手部
+电流相关保护、20 ms帧有效期、反馈健康/失联处理、独占控制、故障停止与急停链路均保留。
+底层FR3控制器和硬件自身还可能有独立限制。本默认路径尚未完成目标工作站、ROS链路或真机验证。
 
 ## 本机默认
 
@@ -28,6 +36,7 @@
 | 图像 | cam0头部、cam1左腕、cam2右腕，沿用本机相机配置 |
 | 下发 | 双臂 `ArmCommand` → 原网关；双手原 SDK `JointCommand` |
 | 默认模式 | RTG、50次预测、执行结束后 disable（RTC 必须显式选择） |
+| 19999 Fast机械臂动态限值 | 默认 `disabled`，不对正常回放增加速度/加速度/jerk软件上限；`--arm-motion-limits legacy` 恢复旧1/3/30及网关1.2 |
 | RTC 默认值 | 初始延迟5步、延迟历史容量10、`exp` schedule、最大引导权重5 |
 | RTC 支持范围 | 仅19999、`50×54`、JAX 推理路径 |
 
@@ -55,13 +64,24 @@ bash deploy/fr3_wuji_fast/serve.sh
 ```
 
 服务就绪后，在另一个终端执行。**下面这条命令会启动真机控制并下发动作**，与慢速入口一样
-使用现场值守模式；它不生成或声称通过物理停止验收。首次验证可用 `--rounds 1`，仍按原速播放：
+使用现场值守模式；它不生成或声称通过物理停止验收。命令不带 `--arm-motion-limits`，因此正常
+模型回放默认没有本地机械臂速度、加速度或jerk软件上限。当前尚无真机验收结果，不能把该默认值
+直接当作首次真机试验的安全配置。首次验证可用 `--rounds 1`，仍按原速播放：
 
 ```bash
 bash deploy/fr3_wuji_fast/run.sh \
   --execute --supervised-trial --start-cameras \
   --rounds 1 --finish-policy disable
 ```
+
+需要复现修改前的动态限值时，给任一 `rtg` / `rtc` / `serial` 命令增加：
+
+```bash
+--arm-motion-limits legacy
+```
+
+这会同时恢复机械臂1 rad/s、Ruckig加速度3 rad/s²、jerk 30 rad/s³和网关1.2 rad/s阈值；
+它不改变模型、RTC引导或30 Hz时间轴。
 
 连续 RTG 部署：
 
@@ -93,8 +113,10 @@ RTG 默认 `--trigger-fraction 0.5 --guidance-steps 3`，动作块中途异步�
 跳过推理期间已过去的节点，再用 cubic 前缀平滑接入剩余节点。RTC 也在块中途请求，但会把
 请求发出时仍有效的旧动作作为 soft prefix 交给模型；控制进程接纳结果时用请求发出至接纳的实际
 端到端延迟向上取整计算跳步，直接安装模型已经引导过的剩余动作，**不会再运行 cubic 拼接**。
-两种连续模式都保留
-后续机械臂速度投影、Ruckig 和设备安全检查。`--rounds` 是接纳的预测次数，不保证每次都播完50步。
+RTG、RTC和serial共用同一机械臂运动限值模式：19999 Fast默认直接使用上述时间轴结果，
+不再经过1 rad/s投影或Ruckig；只有 `--arm-motion-limits legacy` 才恢复旧动态限制。
+三种模式都继续经过关节位置、跟踪、接触、时效、反馈健康与停止检查。
+`--rounds` 是接纳的预测次数，不保证每次都播完50步。
 单块包含50个节点，首末节点相距49/30秒，最后节点保留一个周期，完整块占50/30秒。
 
 RTC 延迟历史以 `--rtc-initial-delay-steps 5` 为种子，首块普通推理的实测延迟也会先写入历史；
@@ -111,8 +133,10 @@ token。过期前缀、回执不匹配或实测延迟超过已引导 horizon 都
 
 ## 继承的设备约束
 
-本入口取消的是慢速规划的主体时间拉伸。原机械臂关节限位、1 rad/s变化率、0.2 rad运动跟踪、
-接触力矩保护、20ms帧有效期、反馈新鲜度和独占控制保持。双手使用当前提交版本的slider模式：
+本入口除取消慢速规划的主体时间拉伸外，19999 Fast默认还取消正常模型回放的机械臂1 rad/s
+变化率投影、Ruckig 1/3/30和网关1.2 rad/s变化率阈值。首次接管仍从实测姿态通过原有受控接近
+到模型首帧；机械臂关节位置范围、0.2 rad运动跟踪、接触力矩保护、20 ms帧有效期、反馈新鲜度、
+失联停止、独占控制、故障停止和急停保持。双手使用当前提交版本的slider模式：
 1 rad/s指令限速、Kp=8、Kd=0.1、电流上限2A及已有接触处理；没有额外提高这些参数。
 快速机械臂跟踪误差参数位于 `deploy/fr3_wuji_fast/limits.py`：
 `ARM_TRACKING_TOLERANCE_RAD = 0.2`（单位 rad）。快速控制循环及设备下发检查共用此值，
@@ -120,10 +144,11 @@ token。过期前缀、回执不匹配或实测延迟超过已引导 horizon 都
 此参数也用于复用快速执行器的64维适配入口；慢速部署仍使用原来的0.08 rad默认值。
 双手模型越界角度沿用慢速连续入口的投影规则，保存原始预测与投影数量。
 
-任何机械臂节点段或RTG/RTC衔接段超过1 rad/s时，快速轨迹层逐关节按1 rad/s限幅并继续追赶目标，
-日志记录被限幅的目标数量；原始模型预测仍保存在 `inference.npz`。它不改变30Hz时钟，也不会把
-网关拒绝隐藏为执行成功。网关1.2 rad/s只提供下发时钟余量，不会主动生成更快轨迹。手部目标可因SDK限速而滞后，
-所以30Hz计划不等于电机一定完整跟上30Hz轨迹。慢速试验成功不能证明这条原速路径已真机验证。
+默认模式下，相邻机械臂模型节点及RTG/RTC衔接产生的变化不会再被本地动态限值改写；30 Hz节点
+仍线性插值为100 Hz命令。`--arm-motion-limits legacy` 才会重新投影目标并使用Ruckig和1.2 rad/s
+网关阈值。原始模型预测仍保存在 `inference.npz`。手部目标可因SDK限速而滞后，所以30 Hz计划
+不等于电机一定完整跟上30 Hz轨迹。无软件动态上限也不代表底层控制器没有限制；慢速或legacy试验
+成功都不能证明新的默认路径已经过真机验证。
 
 无硬件地检查历史预测（返回码1表示有预测被拒绝）：
 
@@ -138,7 +163,10 @@ bash deploy/fr3_wuji/run.sh -m deploy.fr3_wuji_fast.inspect \
 
 - `fast-config.json`：RTC 配置位于 `options.rtc_initial_delay_steps`、
   `options.rtc_delay_buffer_size`、`options.rtc_prefix_attention_schedule`、
-  `options.rtc_max_guidance_weight`；`runtime.json` 保存设备、权重和继承限制，不重复 RTC 上下文。
+  `options.rtc_max_guidance_weight`；运行配置同时以 `arm_motion_limits`、`arm_speed_enforced`、
+  `arm_speed_rad_s` 和 `arm_smoothing` 记录所选机械臂运动限值模式。`runtime.json` 保存
+  设备、权重和仍生效的边界，不重复 RTC 上下文。审计时必须区分默认 `disabled` 和 `legacy`，
+  不能从旧日志中的1/3/30字段推断新运行仍在限速。
 - `chunk-NNNN/inference.npz`：原始50×54预测、输入实测状态；RTC 请求还以
   `rtc_previous_actions` 保存送入模型的旧动作前缀。
 - `chunk-NNNN/admission.json`：原始时间戳、请求ID、观测时效、任务指令；RTC 字段位于 `rtc` 对象，
@@ -161,20 +189,24 @@ env -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .ve
 ```
 
 覆盖30Hz节点和插值、RTG/RTC延迟补偿与实际衔接点、RTC 回执绑定及不重复 cubic 拼接、
-模型形状/单位契约、越界与超速拒绝、
+模型形状/单位契约、默认动态目标不被改写、legacy 1/3/30回归、关节越界与其余安全边界拒绝、
 动作块顺序/权重身份/原始期限、连续发送、推理缺失、调度超时、反馈过期、取消和断连停止。
 另有真实本机socket + 独立控制进程测试，使用原 `DeviceSession` 与原 IPC bridge 验证双块执行及释放。
 
-截至 **2026-10-13**，RTC 代码已准备完成，但当前电脑缺少项目依赖、GPU 和真机链路，因此这里
-**没有声称已运行 pytest、GPU/JAX JIT 或实机验证**。建议在另一台工作站按以下顺序验证：
+截至 **2026-10-17**，RTC与机械臂运动限值模式的代码/离线验证结果以
+[`docs/开发日志.md`](../../docs/开发日志.md)最新条目为准。当前仍未完成目标工作站、GPU/JAX、
+ROS整链路或真机验证，本文不声称新的默认回放路径已通过实机验收。建议按以下顺序验证：
 
-1. 在仓库根目录安装锁定依赖及快速入口额外依赖；根工作区会以 editable workspace 包安装
-   `packages/openpi-client`，因此另一台电脑必须同步包含本次新增的 `openpi_client.rtc`：
+1. 在仓库根目录安装锁定依赖；根工作区会以 editable workspace 包安装
+   `packages/openpi-client`，因此另一台电脑必须同步包含本次新增的 `openpi_client.rtc`。
+   只有需要 `--arm-motion-limits legacy`（30000v2 Fast包装默认使用）时，才需要安装快速入口中
+   固定的Ruckig依赖：
 
    ```bash
    git submodule update --init --recursive
    GIT_LFS_SKIP_SMUDGE=1 uv sync --locked
    GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+   # legacy 模式或30000v2 Fast包装：
    uv pip install --python .venv/bin/python -r deploy/fr3_wuji_fast/requirements.txt
    .venv/bin/python -c 'from openpi_client import rtc; import ruckig; print(rtc.PROTOCOL_VERSION, ruckig.__file__)'
    ```
@@ -227,14 +259,16 @@ env -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .ve
    guided 路径仍以服务启动预热和上一步定向 pytest 为准，输出动作不得送入硬件。
 5. 先做 RTG 回归，再在现场值守、低风险姿态和可立即停机条件下做 RTC 实机试验。`--rounds 1`
    没有前一个动作块可供 RTC 拼接，至少需要 `--rounds 2` 才能覆盖 RTC 换块；结束仍建议 `disable`。
+   新的默认动态限值模式应与 `--arm-motion-limits legacy` 分开留存命令和日志；在确认模型原始
+   相邻节点变化、底层控制器限制与停止链路前，不应直接扩大轮数。
 6. 核对 `fast-config.json`、每块 `admission.json` / `inference.npz`、`control/events.jsonl` 和
    `fast-report.json` 中的预测延迟、实测跳步、前缀 horizon、回执绑定和停止结果，再逐步扩大轮数。
 
-2026-09-14 抽查最近20条明确来自19999_269的历史预测，16条通过原始节点限位和机械臂原速检查，
-4条超过0.7rad/s。该结果仅验证静态动作数组，不验证现场首帧、RTG衔接、碰撞、物理跟踪或停止。
-本次开发没有启动真实机器人，也没有加载GPU模型。
+2026-09-14 抽查最近20条明确来自19999_269的历史预测，16条通过当时的原始节点限位和机械臂
+速度检查，4条超过0.7 rad/s。这是旧阈值下的历史结果，不是当前默认模式的准入结论；它也只验证
+静态动作数组，不验证现场首帧、RTG衔接、碰撞、物理跟踪或停止。本次更新没有启动真实机器人。
 
-速度参数更新后需重新运行快速执行命令，模型服务无需重启。
+切换 `--arm-motion-limits` 后需重新运行快速执行命令，模型服务无需重启。
 
 ## 底层故障诊断与停止（2026-09-18）
 
@@ -264,18 +298,20 @@ bash experiments/weight_motion_eval/oneshot/build_overlay.sh
 新建overlay时 `prepare_overlay.py` 会自动加入诊断代码。构建完成后重新运行执行端，
 模型服务无需重启。
 
-## 快速机械臂平滑（2026-09-18）
+## Legacy 快速机械臂平滑（2026-09-18；当前非19999默认）
 
-快速执行端现在在100Hz下发前使用本地 Ruckig 保留上一帧指令的位置、速度、加速度，
+显式选择 `--arm-motion-limits legacy` 时，快速执行端在100Hz下发前使用本地 Ruckig
+保留上一帧指令的位置、速度、加速度，
 对14个机械臂关节持续生成受约束的目标；动作块切换不重置生成器，块内部也经过同一处理。
 RTG 节点拼接与默认 `--guidance-steps 3` 不变；RTC 则直接使用模型 soft prefix guidance 后的动作，
 不再做第二次 cubic 拼接。双手目标与SDK控制不变。
 首次接近、块间等待和末尾到位均使用同一生成器；末尾必须等生成器到达目标且停止，再检查实测停稳。
 急停、时效故障和反馈异常仍直接走原停止流程，不等待平滑。
 
-Ruckig 只影响 `fr3_wuji_fast` 及复用它的64维**快速**入口；RTC 只支持19999 / 54D / JAX，
-不会因此扩展到64维。中速 `fr3_wuji_medium`、
-慢速播放器、共用设备代码、底层阻抗参数均未修改。此功能是执行端轨迹平滑，并非模型端RTC。
+Ruckig只在legacy模式生效。19999 Fast的RTG/RTC/serial默认不启用它；复用快速执行层的
+30000v2包装默认仍选择legacy。RTC只支持19999 / 54D / JAX，不会因此扩展到64维。
+中速 `fr3_wuji_medium`、慢速播放器和底层阻抗参数均未修改。此功能是执行端轨迹平滑，
+并非模型端RTC。
 
 调参位置：`deploy/fr3_wuji_fast/limits.py`：
 
@@ -284,21 +320,21 @@ ARM_ACCELERATION_RAD_S2 = 3.0  # rad/s²
 ARM_JERK_RAD_S3 = 30.0        # rad/s³，加速度变化率
 ```
 
-速度上限仍为 `timeline.py` 的 `ARM_SPEED_RAD_S = 1.0`，跟踪阈值仍为0.2rad。
+legacy速度上限为1.0 rad/s，跟踪阈值在默认和legacy两种模式下都仍为0.2 rad。
 降低加速度/jerk一般会使动作柔和，但增大目标跟随延迟；默认值为待现场验证的起点。
 这不是整段慢放：模型30Hz时间轴和100Hz下发不变，但机械臂可能滞后于模型目标，
 手臂与手指的配合时序、接触动作和成功率需要复测。使用当前采样位置作为静止目标反复重规划，
 未将有突变的原始目标速度直接传入。生成器不使用远程服务或中间路点。
 
-新增依赖只由快速入口导入并固定版本；目标部署环境必须安装，不能把当前这台没有可用 `.venv` 的
-电脑视为已安装：
+Ruckig依赖由legacy路径导入并固定版本；要使用legacy或默认选择legacy的30000v2 Fast包装，
+目标部署环境必须安装，不能把当前这台没有可用 `.venv` 的电脑视为已安装：
 
 ```bash
 .deployment/tools/bin/uv pip install --python .venv/bin/python -r deploy/fr3_wuji_fast/requirements.txt
 ```
 
-依赖缺失、版本错误、平滑参数非法会在启动设备前报错。生成失败或预测制动轨迹越界时停止，
+legacy下依赖缺失、版本错误、平滑参数非法会在启动设备前报错。生成失败或预测制动轨迹越界时停止，
 不会退回原始目标继续发送。参数保存在 `fast-config.json`；`control/events.jsonl` 的
 `arm_smoothing_sample` 以10Hz记录原机械臂目标、生成器加速度与目标偏差，
 `frame_submitted.command` 为实际下发位置，`complete` 保存全程最大平滑偏差。
-修改参数后重启快速执行命令即可，原启动参数仍可用，模型服务不用重启。
+这些平滑字段只应在legacy运行中解释。修改模式或参数后重启快速执行命令即可，模型服务不用重启。

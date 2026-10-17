@@ -39,9 +39,28 @@ def wire_frame(frame):
 class DeviceClient:
     """Synchronous acknowledgements; no queued or retried motion commands."""
 
-    def __init__(self, path, *, feedback_type, speed_validator, execute=False, finish_policy="hold", sock=None, arm_speed_rad_s):
+    def __init__(
+        self,
+        path,
+        *,
+        feedback_type,
+        speed_validator,
+        execute=False,
+        finish_policy="hold",
+        sock=None,
+        arm_speed_rad_s,
+        arm_speed_enforced=True,
+    ):
         self.feedback_type = feedback_type
-        self.arm_speed_rad_s = speed_validator(arm_speed_rad_s)
+        if type(arm_speed_enforced) is not bool:
+            raise ValueError("Arm speed enforcement flag must be boolean")
+        self.arm_speed_enforced = arm_speed_enforced
+        if arm_speed_enforced:
+            self.arm_speed_rad_s = speed_validator(arm_speed_rad_s)
+        elif arm_speed_rad_s is not None:
+            raise ValueError("Disabled arm speed enforcement requires arm_speed_rad_s=None")
+        else:
+            self.arm_speed_rad_s = None
         self.sock = sock or socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         if sock is None:
             self.sock.settimeout(5)
@@ -94,9 +113,15 @@ class DeviceClient:
 
     def decode_feedback(self, result):
         feedback = self.feedback_type(**result)
-        if feedback.arm_speed_rad_s != self.arm_speed_rad_s:
+        # Medium keeps its isolated Feedback schema. A missing policy field is
+        # the historical enforced mode; it can never satisfy a disabled client.
+        feedback_enforced = getattr(feedback, "arm_speed_enforced", True)
+        if (feedback_enforced, feedback.arm_speed_rad_s) != (
+            self.arm_speed_enforced,
+            self.arm_speed_rad_s,
+        ):
             self.close()
-            raise RuntimeError("Device/client arm speed configuration mismatch")
+            raise RuntimeError("Device/client arm speed configuration mismatch (policy/value)")
         return feedback
 
     def feedback(self, now):

@@ -58,7 +58,12 @@ def test_fast_control_uses_its_own_tracking_threshold(error):
     clock, events = Clock(), []
     devices = Devices(clock)
     devices.guard = ConsumerGuard(
-        LIMITS["lower"], LIMITS["upper"], hand_control="slider", arm_speed_rad_s=1.0, arm_tracking_rad=FAST_TRACKING
+        LIMITS["lower"],
+        LIMITS["upper"],
+        hand_control="slider",
+        arm_speed_enforced=False,
+        arm_speed_rad_s=None,
+        arm_tracking_rad=FAST_TRACKING,
     )
     submit = devices.submit
 

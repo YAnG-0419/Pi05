@@ -29,14 +29,13 @@ from .consumer import FastConsumer
 from .ipc import RemoteDevices
 from .limits import ARM_TRACKING_TOLERANCE_RAD
 from .smoothing import checked_backend
-from .smoothing import smoothing_settings
-from .timeline import ARM_SPEED_RAD_S
+from .timeline import ARM_MOTION_LIMITS
 from .timeline import Timeline
+from .timeline import arm_motion_settings
 
 ROOT = hardware.ROOT
 GATEWAY_ARM_SPEED_RAD_S = 1.2
 DEFAULT_CHECKPOINT = ROOT / "checkpoints/19999_269/19999"
-
 
 
 def parse_args(argv=None):
@@ -56,6 +55,12 @@ def parse_args(argv=None):
     parser.add_argument("--start-cameras", action="store_true")
     parser.add_argument("--finish-policy", choices=("hold", "disable"), default="disable")
     parser.add_argument("--broker-mode", choices=("rtg", "rtc", "serial"), default="rtg")
+    parser.add_argument(
+        "--arm-motion-limits",
+        choices=ARM_MOTION_LIMITS,
+        default="disabled",
+        help="disabled replays model arm targets without the legacy speed/Ruckig layer",
+    )
     parser.add_argument("--rounds", type=int, default=50, help="Finite number of admitted model chunks")
     parser.add_argument("--guidance-steps", type=int, default=3)
     parser.add_argument("--trigger-fraction", type=float, default=0.5)
@@ -113,6 +118,7 @@ def stream_options(args):
         "rtc_delay_buffer_size": args.rtc_delay_buffer_size,
         "rtc_prefix_attention_schedule": args.rtc_prefix_attention_schedule,
         "rtc_max_guidance_weight": args.rtc_max_guidance_weight,
+        "arm_motion_limits": args.arm_motion_limits,
     }
 
 
@@ -134,23 +140,31 @@ def check_model_metadata(model, expected, *, broker_mode, rtc_schedule):
 
 
 def launch_commands(args, output, ipc):
+    motion = arm_motion_settings(args.arm_motion_limits)
     commands = hardware.launch_commands(args, output, ipc)
     if "gateway" in commands:
-        commands["gateway"] += ["--arm-speed-rad-s", str(GATEWAY_ARM_SPEED_RAD_S)]
+        if motion["arm_speed_enforced"]:
+            commands["gateway"] += ["--arm-speed-rad-s", str(GATEWAY_ARM_SPEED_RAD_S)]
+        else:
+            commands["gateway"].append("--disable-arm-speed-limit")
     return commands
 
 
 def main(argv=None):
     args = parse_args(argv)
-    # Fail before starting cameras/controllers if the fast-only dependency or
-    # acceleration/jerk settings are invalid.
-    checked_backend()
-    smoothing = smoothing_settings()
+    motion = arm_motion_settings(args.arm_motion_limits)
+    # Legacy mode still fails before starting cameras/controllers when its
+    # optional 100 Hz motion generator is unavailable or misconfigured.
+    if motion["arm_speed_enforced"]:
+        checked_backend()
+    smoothing = motion["arm_smoothing"]
     arm_tracking = checked_arm_tracking_tolerance(ARM_TRACKING_TOLERANCE_RAD)
     output = safe_output(args.output)
     output.mkdir(parents=True)
     runtime, limits, _ = hardware.write_runtime(args, output, checkpoint_contract)
-    runtime["arm_speed_rad_s"] = ARM_SPEED_RAD_S
+    runtime["arm_motion_limits"] = motion["arm_motion_limits"]
+    runtime["arm_speed_enforced"] = motion["arm_speed_enforced"]
+    runtime["arm_speed_rad_s"] = motion["arm_speed_rad_s"]
     runtime["arm_tracking_rad"] = arm_tracking
     (output / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     settings = {
@@ -161,11 +175,17 @@ def main(argv=None):
         "units": "radian",
         "model_uri": args.uri,
         "options": stream_options(args),
+        "arm_motion_limits": motion["arm_motion_limits"],
+        "arm_speed_enforced": motion["arm_speed_enforced"],
+        "arm_speed_rad_s": motion["arm_speed_rad_s"],
         "arm_smoothing": smoothing,
         "initial_approach": "existing bounded quintic approach only",
         "device_limits_inherited": {
-            "arm_speed_rad_s": ARM_SPEED_RAD_S,
-            "gateway_arm_speed_ceiling_rad_s": GATEWAY_ARM_SPEED_RAD_S,
+            "arm_speed_enforced": motion["arm_speed_enforced"],
+            "arm_speed_rad_s": motion["arm_speed_rad_s"],
+            "gateway_arm_speed_ceiling_rad_s": (
+                GATEWAY_ARM_SPEED_RAD_S if motion["arm_speed_enforced"] else None
+            ),
             "arm_tracking_rad": ARM_TRACKING_TOLERANCE_RAD,
             "slider_speed_rad_s": SLIDER_SPEED_RAD_S,
             "hand_current_a": SLIDER_CURRENT_A,
@@ -244,7 +264,8 @@ def main(argv=None):
             ipc / "devices.sock",
             execute=args.execute,
             finish_policy=args.finish_policy,
-            arm_speed_rad_s=ARM_SPEED_RAD_S,
+            arm_speed_enforced=motion["arm_speed_enforced"],
+            arm_speed_rad_s=motion["arm_speed_rad_s"],
         )
         stack.callback(devices.close)
         consumer = None

@@ -1,14 +1,21 @@
 # OpenPI FR3 与 Wuji 部署
 
-更新日期：2026-10-13
+更新日期：2026-10-17
 
 本仓库用于 FR3 双臂与 Wuji 双手的 pi05 番茄采摘任务，包含模型微调、推理服务和机器人执行入口。基于 Physical Intelligence 的 OpenPI 项目，当前操作入口以本页和根目录的使用说明为准。
 
-**完整操作说明：[FR3_Wuji_pi05部署使用说明.docx](FR3_Wuji_pi05部署使用说明.docx)**。文档包括快速指南、各模型启动命令、参数说明、state/action 映射和当前软件阈值。
+**完整操作说明：[FR3_Wuji_pi05部署使用说明.docx](FR3_Wuji_pi05部署使用说明.docx)**。文档包括快速指南、各模型启动命令、参数说明和state/action映射；其中Fast 1/3/30阈值表对应legacy行为，
+2026-10-17后的19999 Fast默认值以本页、[快速部署 README](deploy/fr3_wuji_fast/README.md)和
+[开发日志](docs/开发日志.md)为准。
 
 > 2026-10-13：19999 快速入口已新增显式 RTC 模式；默认仍是 RTG。RTC 的最新接入边界、异机安装和
 > 验证步骤以[快速部署 README](deploy/fr3_wuji_fast/README.md)与[开发日志](docs/开发日志.md)为准。
 > 当前电脑只完成 Python 静态编译和 diff 空白检查，未运行 pytest、GPU/JAX JIT 或真机链路。
+
+> 2026-10-17：19999 Fast的 `--arm-motion-limits` 默认 `disabled`；RTG、RTC、serial均取消正常模型回放的机械臂速度、加速度和jerk
+> 软件上限；`--arm-motion-limits legacy` 恢复旧1 rad/s、3 rad/s²、30 rad/s³及网关1.2 rad/s。
+> 30000v2 Fast包装默认仍为legacy。首次受控接近、关节位置、0.2 rad跟踪、接触力矩/电流相关保护、
+> 20 ms时效、反馈健康/失联和急停均保留；新默认尚未完成目标工作站、ROS或真机验证。
 
 ## 快速开始
 
@@ -59,7 +66,9 @@ bash deploy/fr3_wuji_medium/run.sh --model 54 \
   --start-cameras --finish-policy disable
 ```
 
-**快速**：采用 30 Hz 模型时间轴，默认使用 RTG 异步衔接。
+**快速**：采用30 Hz模型时间轴，默认使用RTG异步衔接。下面的19999命令不传
+`--arm-motion-limits`，因此正常模型回放默认没有本地机械臂速度、加速度或jerk软件上限；
+这不表示硬件无限速或已通过真机验收。回退旧动态限值可增加 `--arm-motion-limits legacy`。
 
 ```bash
 bash deploy/fr3_wuji_fast/run.sh \
@@ -82,11 +91,14 @@ bash deploy/fr3_wuji_fast/run.sh \
   --rounds 50 --start-cameras --finish-policy disable
 ```
 
-迁移到另一台电脑时，除仓库锁定依赖外还要安装
-`deploy/fr3_wuji_fast/requirements.txt`，并确认 workspace 中的 `packages/openpi-client` 已更新且可导入
-`openpi_client.rtc`；可直接使用上述两份 RTC 文档中的完整安装与无硬件验证命令。
+迁移到另一台电脑时，确认workspace中的 `packages/openpi-client` 已更新且可导入
+`openpi_client.rtc`。只有使用 `--arm-motion-limits legacy` 或默认legacy的30000v2 Fast包装时，
+还需安装 `deploy/fr3_wuji_fast/requirements.txt` 中的Ruckig依赖；完整安装与无硬件验证命令见上述文档。
 
-三种入口均以 100 Hz 下发设备指令，实际运行耗时还受轨迹约束和推理衔接影响。慢/中速的 `--rounds 50 --replan-steps 20` 表示运行 50 轮，每轮预测 50 步、使用前 20 步；快速入口不使用 `--continuous` 或 `--replan-steps`。
+三种入口均以100 Hz下发设备指令。慢/中速以及Fast首次接管/legacy仍受各自轨迹约束；19999 Fast
+默认回放不加动态软件上限，实际运动仍可能受底层控制器、硬件、推理衔接和到位等待影响。
+慢/中速的 `--rounds 50 --replan-steps 20` 表示运行50轮，每轮预测50步、使用前20步；
+快速入口不使用 `--continuous` 或 `--replan-steps`。
 
 ### Home 归位
 

@@ -158,7 +158,16 @@ def main():
     if args.supervised_trial and (not args.execute or args.qualification is not None):
         parser.error("Supervised trial must explicitly enable output and cannot claim commissioning")
     config = json.loads(args.runtime.read_text())
-    arm_speed = checked_arm_speed(config.get("arm_speed_rad_s", 0.7))
+    arm_speed_enforced = config.get("arm_speed_enforced", True)
+    if type(arm_speed_enforced) is not bool:
+        raise ValueError("arm_speed_enforced must be boolean")
+    configured_arm_speed = config.get("arm_speed_rad_s", 0.7 if arm_speed_enforced else None)
+    if arm_speed_enforced:
+        arm_speed = checked_arm_speed(configured_arm_speed)
+    elif configured_arm_speed is not None:
+        raise ValueError("Disabled arm speed enforcement requires arm_speed_rad_s=null")
+    else:
+        arm_speed = None
     arm_tracking = checked_arm_tracking_tolerance(config.get("arm_tracking_rad", ARM_TRACKING_TOLERANCE_RAD))
     for path, expected in config["reference_hashes"].items():
         if digest(path) != expected:
@@ -246,6 +255,7 @@ def main():
             continuous=config.get("continuous", False),
             defer_motion_gc=True,
             arm_speed_rad_s=arm_speed,
+            arm_speed_enforced=arm_speed_enforced,
             arm_tracking_rad=arm_tracking,
             qualification=qualification,
             hand_control=config.get("hand_control", "strict"),

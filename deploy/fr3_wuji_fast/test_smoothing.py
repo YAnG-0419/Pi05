@@ -106,18 +106,18 @@ def test_invalid_limits_rejected(name, value, monkeypatch):
         smoothing_settings()
 
 
-def test_end_to_end_no_endpoint_snap_and_settle_waits_for_generator():
+def test_legacy_end_to_end_no_endpoint_snap_and_settle_waits_for_generator():
     clock = Clock()
-    devices = Devices(clock)
+    devices = Devices(clock, arm_motion_limits="legacy")
     raw = np.zeros((50, 54))
     raw[15:, ARM] = 0.15
     raw[35:, ARM] = -0.1
     events = []
     run_control(
         devices,
-        initial(chunk(raw=raw)),
+        initial(chunk(raw=raw), arm_motion_limits="legacy"),
         LIMITS,
-        {"rounds": 1},
+        {"rounds": 1, "arm_motion_limits": "legacy"},
         queue.Queue(),
         events.append,
         lambda *args: None,
@@ -134,6 +134,31 @@ def test_end_to_end_no_endpoint_snap_and_settle_waits_for_generator():
     assert any(e["event"] == "arm_smoothing_sample" for e in events)
 
 
+def test_default_end_to_end_replays_fast_arm_derivative_without_ruckig():
+    clock = Clock()
+    devices = Devices(clock)
+    raw = np.zeros((50, 54))
+    raw[1:, ARM] = 0.1
+    events = []
+    run_control(
+        devices,
+        initial(chunk(raw=raw)),
+        LIMITS,
+        {"rounds": 1},
+        queue.Queue(),
+        events.append,
+        lambda *args: None,
+        lambda: False,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+    playback = [frame for frame in devices.frames if frame.phase == "playback"]
+    assert max(np.max(np.abs(frame.velocities[ARM])) for frame in playback) > 1.0
+    assert not any(event["event"] == "arm_smoothing_sample" for event in events)
+    complete = next(event for event in events if event["event"] == "complete")
+    assert complete["arm_smoothing_max_deviation_rad"] is None
+
+
 def test_fast_smoothing_does_not_modify_medium_or_slow_settings(monkeypatch):
     from deploy.fr3_wuji_medium import profile as medium
     from experiments.weight_motion_eval.oneshot import limits as slow
@@ -147,7 +172,7 @@ def test_fast_smoothing_does_not_modify_medium_or_slow_settings(monkeypatch):
     assert medium.planning_config() == config
 
 
-def test_preview_records_smoothing_and_keeps_existing_guidance(tmp_path, monkeypatch):
+def test_preview_records_disabled_motion_policy_and_keeps_existing_guidance(tmp_path, monkeypatch):
     import json
 
     from . import deploy
@@ -155,5 +180,6 @@ def test_preview_records_smoothing_and_keeps_existing_guidance(tmp_path, monkeyp
     monkeypatch.setattr(deploy, "safe_output", lambda _: tmp_path / "preview")
     deploy.main(["--check"])
     config = json.loads((tmp_path / "preview/fast-config.json").read_text())
-    assert config["arm_smoothing"] == smoothing_settings()
+    assert config["arm_motion_limits"] == "disabled"
+    assert config["arm_smoothing"] is None
     assert config["options"]["guidance_steps"] == 3

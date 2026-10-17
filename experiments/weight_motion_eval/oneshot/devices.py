@@ -35,6 +35,7 @@ class DeviceSession:
         continuous=False,
         defer_motion_gc=False,
         arm_speed_rad_s=0.7,
+        arm_speed_enforced=True,
         arm_tracking_rad=ARM_TRACKING_TOLERANCE_RAD,
     ):
         self.motion_gc = MotionGC() if defer_motion_gc else None
@@ -48,6 +49,7 @@ class DeviceSession:
             limits["upper"],
             hand_control=hand_control,
             arm_speed_rad_s=arm_speed_rad_s,
+            arm_speed_enforced=arm_speed_enforced,
             arm_tracking_rad=arm_tracking_rad,
         )
         self.state = "readonly"
@@ -113,6 +115,7 @@ class DeviceSession:
             hand_soft_limits=soft_limits,
             hand_contacts=contacts,
             arm_speed_rad_s=self.guard.arm_speed_rad_s,
+            arm_speed_enforced=self.guard.arm_speed_enforced,
         )
         target = feedback.effective_target(self.last.positions) if self.last is not None else None
         reached = self.last is None or all(

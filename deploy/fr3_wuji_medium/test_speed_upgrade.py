@@ -121,6 +121,7 @@ def test_actual_sdk_send_uses_doubled_hand_limit(monkeypatch, mode, speed):
 
 def test_ipc_qualification_and_slow_modules_keep_distinct_limits():
     client = object.__new__(RemoteDevices)
+    client.arm_speed_enforced = True
     client.arm_speed_rad_s = 2.0
     closed = []
     client.close = lambda: closed.append(True)
